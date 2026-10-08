@@ -1,0 +1,13 @@
+{
+	email {$ACME_EMAIL}
+}
+
+# API de staging
+{$DOMINIO_STAGING} {
+	reverse_proxy staging-api:8080
+}
+
+# API de produção
+{$DOMINIO_PRODUCAO} {
+	reverse_proxy producao-api:8080
+}

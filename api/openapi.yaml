@@ -1,0 +1,23 @@
+openapi: 3.0.3
+info:
+  title: Voltik API
+  version: 0.1.0
+  description: Contrato único da API do Voltik, partilhado pelas apps Android e iOS e pelo portal web.
+servers:
+  - url: http://localhost:8080/v1
+    description: Desenvolvimento
+paths:
+  /saude:
+    get:
+      summary: Verifica se a API está a funcionar
+      responses:
+        "200":
+          description: API operacional
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  estado:
+                    type: string
+                    example: ok

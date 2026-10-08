@@ -1,0 +1,68 @@
+# =============================================================================
+# VOLTIK · serviços de um ambiente no servidor (staging OU produção)
+# Não se usa à mão: é chamado pelo infra/server/publicar.sh, com
+#   -p voltik-staging  ou  -p voltik-producao
+# Cada ambiente tem a sua base de dados, o seu volume e o seu .env.
+# =============================================================================
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?falta no .env}
+      VOLTIK_MIGRACOES_PASSWORD: ${VOLTIK_MIGRACOES_PASSWORD:?falta no .env}
+      VOLTIK_API_PASSWORD: ${VOLTIK_API_PASSWORD:?falta no .env}
+      VOLTIK_LEITURA_PASSWORD: ${VOLTIK_LEITURA_PASSWORD:?falta no .env}
+      TZ: UTC
+    ports:
+      # Só acessível no próprio servidor (DBeaver chega cá por túnel SSH)
+      - "127.0.0.1:${DB_PORTA_TUNEL:?falta no .env}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ${VOLTIK_DIR:?}/database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d voltik"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [interna]
+
+  migrate:
+    image: migrate/migrate:v4.20.1
+    profiles: ["ferramentas"]
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ${VOLTIK_DIR:?}/database/migrations:/migrations:ro
+    entrypoint:
+      - migrate
+      - -path=/migrations
+      - -database=postgres://voltik_migracoes:${VOLTIK_MIGRACOES_PASSWORD}@db:5432/voltik?sslmode=disable
+    networks: [interna]
+
+  api:
+    image: voltik-api:${VERSAO:?}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      AMBIENTE: ${AMBIENTE:?}
+      PORTA: "8080"
+      DATABASE_URL: postgres://voltik_api:${VOLTIK_API_PASSWORD}@db:5432/voltik?sslmode=disable
+      CORS_ORIGENS: ${CORS_ORIGENS:-}
+    networks:
+      interna: {}
+      proxy:
+        aliases: ["${AMBIENTE}-api"]   # o Caddy encontra-a como staging-api ou producao-api
+
+volumes:
+  pgdata:
+
+networks:
+  interna: {}
+  proxy:
+    external: true
+    name: voltik-proxy

@@ -1,0 +1,47 @@
+# =============================================================================
+# VOLTIK · base de dados LOCAL (opcional)
+# O desenvolvimento normal testa-se em STAGING (ver docs/guias/00-guia-de-arranque.md).
+# Isto serve só para testar uma migração no Mac antes de a enviar para staging,
+# para não partir o staging ao outro.
+#   docker compose up -d db
+#   docker compose --profile ferramentas run --rm migrate up
+# =============================================================================
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: voltik-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no .env}
+      VOLTIK_MIGRACOES_PASSWORD: ${VOLTIK_MIGRACOES_PASSWORD:?Defina no .env}
+      VOLTIK_API_PASSWORD: ${VOLTIK_API_PASSWORD:?Defina no .env}
+      VOLTIK_LEITURA_PASSWORD: ${VOLTIK_LEITURA_PASSWORD:?Defina no .env}
+      TZ: UTC
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - voltik_pgdata:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h 127.0.0.1 garante que só fica "pronto" depois de terminar a inicialização
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d voltik"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    image: migrate/migrate:v4.20.1
+    profiles: ["ferramentas"]
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./database/migrations:/migrations:ro
+    entrypoint:
+      - migrate
+      - -path=/migrations
+      - -database=postgres://voltik_migracoes:${VOLTIK_MIGRACOES_PASSWORD}@db:5432/voltik?sslmode=disable
+
+volumes:
+  voltik_pgdata:

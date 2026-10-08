@@ -1,0 +1,50 @@
+# Segredos
+.env
+*.pem
+*.key
+id_rsa*
+
+# Sistema e editores
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Go
+backend/bin/
+*.exe
+*.test
+*.out
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+ml/modelos/*.pkl
+ml/dados/
+
+# Android (Kotlin)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/captures/
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# iOS (Swift)
+ios/**/xcuserdata/
+ios/DerivedData/
+ios/build/
+*.ipa
+
+# Web (Vue)
+web/node_modules/
+web/dist/
+
+# Cópias de segurança da base de dados
+*.dump
+backups/

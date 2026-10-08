@@ -1,0 +1,25 @@
+# Proxy HTTPS único para os dois ambientes. Arrancar uma vez no servidor:
+#   cd infra/proxy && docker compose up -d
+# Os certificados HTTPS (Let's Encrypt) são obtidos e renovados sozinhos.
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    env_file: .env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [proxy]
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  proxy:
+    external: true
+    name: voltik-proxy
