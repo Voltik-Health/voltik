@@ -1,10 +1,10 @@
 # =============================================================================
-# VOLTIK · base de dados LOCAL (opcional)
-# O desenvolvimento normal testa-se em STAGING (ver docs/guias/00-guia-de-arranque.md).
-# Isto serve só para testar uma migração no Mac antes de a enviar para staging,
-# para não partir o staging ao outro.
+# VOLTIK · LOCAL database (optional)
+# Day-to-day work is tested on STAGING (see docs/guides/00-getting-started.md).
+# This is only for trying a migration on your Mac before sending it to staging,
+# so you don't break staging for the other developer.
 #   docker compose up -d db
-#   docker compose --profile ferramentas run --rm migrate up
+#   docker compose --profile tools run --rm migrate up
 # =============================================================================
 services:
   db:
@@ -13,10 +13,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no .env}
-      VOLTIK_MIGRACOES_PASSWORD: ${VOLTIK_MIGRACOES_PASSWORD:?Defina no .env}
-      VOLTIK_API_PASSWORD: ${VOLTIK_API_PASSWORD:?Defina no .env}
-      VOLTIK_LEITURA_PASSWORD: ${VOLTIK_LEITURA_PASSWORD:?Defina no .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      VOLTIK_MIGRATIONS_PASSWORD: ${VOLTIK_MIGRATIONS_PASSWORD:?set in .env}
+      VOLTIK_API_PASSWORD: ${VOLTIK_API_PASSWORD:?set in .env}
+      VOLTIK_READONLY_PASSWORD: ${VOLTIK_READONLY_PASSWORD:?set in .env}
       TZ: UTC
     ports:
       - "127.0.0.1:5432:5432"
@@ -24,7 +24,7 @@ services:
       - voltik_pgdata:/var/lib/postgresql/data
       - ./database/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      # -h 127.0.0.1 garante que só fica "pronto" depois de terminar a inicialização
+      # -h 127.0.0.1 makes sure it only reports "ready" after initialisation has finished
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d voltik"]
       interval: 5s
       timeout: 5s
@@ -32,7 +32,7 @@ services:
 
   migrate:
     image: migrate/migrate:v4.20.1
-    profiles: ["ferramentas"]
+    profiles: ["tools"]
     depends_on:
       db:
         condition: service_healthy
@@ -41,7 +41,7 @@ services:
     entrypoint:
       - migrate
       - -path=/migrations
-      - -database=postgres://voltik_migracoes:${VOLTIK_MIGRACOES_PASSWORD}@db:5432/voltik?sslmode=disable
+      - -database=postgres://voltik_migrations:${VOLTIK_MIGRATIONS_PASSWORD}@db:5432/voltik?sslmode=disable
 
 volumes:
   voltik_pgdata:

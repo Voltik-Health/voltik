@@ -1,8 +1,8 @@
-# Documentação
+# Documentation
 
-| Pasta | Conteúdo |
+| Folder | Contents |
 |---|---|
-| `guias/` | Passo a passo: começar pelo `00-guia-de-arranque.md` |
-| `entregas/` | Caderno de Encargos e Relatório de Viabilidade Tecnológica |
-| `diagramas/` | Arquitetura e modelo de dados |
-| `decisoes/` | Registo das decisões técnicas importantes (uma por ficheiro) |
+| `guides/` | Step-by-step guides: start with `00-getting-started.md` |
+| `deliverables/` | Statement of requirements and technology feasibility report (PDF, in Portuguese) |
+| `decisions/` | Architecture decision records (one per file) |
+| `diagrams/` | Architecture and data model |

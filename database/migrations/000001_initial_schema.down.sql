@@ -1,0 +1,31 @@
+-- Reverts migration 000001: drops every table of the initial schema.
+-- WARNING: deletes all data. Development only.
+DROP TABLE IF EXISTS notification_tokens CASCADE;
+DROP TABLE IF EXISTS consents CASCADE;
+DROP TABLE IF EXISTS data_access_audit_log CASCADE;
+DROP TABLE IF EXISTS chat_messages CASCADE;
+DROP TABLE IF EXISTS clinical_reports CASCADE;
+DROP TABLE IF EXISTS chat_conversations CASCADE;
+DROP TABLE IF EXISTS teleconsultations CASCADE;
+DROP TABLE IF EXISTS patient_professional_assignments CASCADE;
+DROP TABLE IF EXISTS health_professionals CASCADE;
+DROP TABLE IF EXISTS iris_chat_interactions CASCADE;
+DROP TABLE IF EXISTS alerts CASCADE;
+DROP TABLE IF EXISTS glucose_predictions CASCADE;
+DROP TABLE IF EXISTS insulin_logs CASCADE;
+DROP TABLE IF EXISTS meal_items CASCADE;
+DROP TABLE IF EXISTS meals CASCADE;
+DROP TABLE IF EXISTS food_servings CASCADE;
+DROP TABLE IF EXISTS foods CASCADE;
+DROP TABLE IF EXISTS physical_activity_logs CASCADE;
+DROP TABLE IF EXISTS glucose_readings CASCADE;
+DROP TABLE IF EXISTS devices CASCADE;
+DROP TABLE IF EXISTS caregiver_links CASCADE;
+DROP TABLE IF EXISTS emergency_contacts CASCADE;
+DROP TABLE IF EXISTS b2c_subscriptions CASCADE;
+DROP TABLE IF EXISTS patients CASCADE;
+DROP TABLE IF EXISTS company_invite_codes CASCADE;
+DROP TABLE IF EXISTS user_profiles CASCADE;
+DROP TABLE IF EXISTS organizations CASCADE;
+DROP TABLE IF EXISTS external_identities CASCADE;
+DROP TABLE IF EXISTS users CASCADE;

@@ -1,7 +1,7 @@
-# Serviço de previsão (Python + FastAPI)
+# Prediction service (Python + FastAPI)
 
-Prevê a glicemia dos próximos 30 minutos a partir das leituras, da atividade física e das refeições.
+Predicts glucose for the next 30 minutes from readings, physical activity and meals.
 
-- Treino com datasets públicos de investigação (OhioT1DM, D1NAMO) e dados simulados.
-- Os dados de treino **não** entram no Git (ver `.gitignore`).
-- Expõe um endpoint HTTP chamado pela API em Go.
+- Trained on public research datasets (OhioT1DM, D1NAMO) and simulated data.
+- Training data does **not** go into Git (see `.gitignore`).
+- Exposes an HTTP endpoint called by the Go API.

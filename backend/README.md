@@ -1,23 +1,34 @@
 # Backend (Go)
 
-API REST do Voltik. O contrato está em [`../api/openapi.yaml`](../api/openapi.yaml).
+Voltik REST API. The contract lives in [`../api/openapi.yaml`](../api/openapi.yaml).
 
-## Arranque
+## Run locally (optional)
 
 ```bash
 cd backend
-go mod init github.com/<organizacao>/voltik/backend
+go test ./...
+go run ./cmd/api        # http://localhost:8080/v1/health
 ```
 
-## Organização em três camadas
+Day-to-day testing happens on staging (`./scripts/to-staging.sh`).
 
-| Pasta | Responsabilidade |
+## Three layers
+
+| Folder | Responsibility |
 |---|---|
-| `cmd/api/` | `main.go`: arranca o servidor e liga as peças |
-| `internal/handler/` | Recebe o pedido HTTP, lê o JSON, chama o serviço. **Sem regras de negócio.** |
-| `internal/service/` | Lógica de negócio: leituras, alertas, permissões, relatórios |
-| `internal/repository/` | Acesso ao PostgreSQL |
+| `cmd/api/` | `main.go`: starts the server and wires everything together |
+| `internal/handler/` | Receives the HTTP request, parses JSON, calls a service. **No business rules.** |
+| `internal/service/` | Business logic: readings, alerts, permissions, reports |
+| `internal/repository/` | PostgreSQL access |
 
-Com a lógica separada do transporte, acrescentar gRPC no futuro é só criar novos handlers sobre os mesmos serviços.
+With business logic separated from transport, adding gRPC later only means writing new handlers on top of the same services.
 
-A API liga-se à base de dados com o papel **`voltik_api`**, nunca com `postgres` nem `voltik_migracoes`.
+## Authentication
+
+External sign-in only (OpenID Connect): Google, Microsoft, Apple and Facebook.
+The API validates the provider's ID token and never stores passwords.
+Users are matched through `external_identities (provider, provider_subject)`.
+
+## Database access
+
+The API connects with the **`voltik_api`** role, never with `postgres` or `voltik_migrations`.

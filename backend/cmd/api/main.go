@@ -1,6 +1,6 @@
-// Ponto de entrada da API do Voltik.
-// Por agora só expõe /v1/saude, para validar a cadeia completa:
-// GitHub -> Jenkins -> imagem Docker -> staging/produção -> proxy HTTPS.
+// Entry point of the Voltik API.
+// For now it only exposes /v1/health, to validate the whole chain:
+// GitHub -> Jenkins -> Docker image -> staging/production -> HTTPS proxy.
 package main
 
 import (
@@ -16,51 +16,51 @@ import (
 	"github.com/voltik/voltik/backend/internal/config"
 )
 
-// versao é preenchida no build: -ldflags "-X main.versao=<commit>"
-var versao = "dev"
+// version is set at build time: -ldflags "-X main.version=<commit>"
+var version = "dev"
 
 func main() {
-	cfg := config.Carregar()
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("ambiente", cfg.Ambiente, "versao", versao)
+	cfg := config.Load()
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("environment", cfg.Environment, "version", version)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/saude", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"estado":   "ok",
-			"ambiente": cfg.Ambiente,
-			"versao":   versao,
+			"status":      "ok",
+			"environment": cfg.Environment,
+			"version":     version,
 		})
 	})
 
 	srv := &http.Server{
-		Addr:              ":" + cfg.Porta,
-		Handler:           comCORS(cfg.OrigensCORS, mux),
+		Addr:              ":" + cfg.Port,
+		Handler:           withCORS(cfg.CORSOrigins, mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {
-		log.Info("API a arrancar", "porta", cfg.Porta)
+		log.Info("API starting", "port", cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Error("erro no servidor", "erro", err)
+			log.Error("server error", "error", err)
 			os.Exit(1)
 		}
 	}()
 
-	// Paragem limpa quando o Docker envia SIGTERM (ex.: numa nova publicação)
-	parar := make(chan os.Signal, 1)
-	signal.Notify(parar, syscall.SIGINT, syscall.SIGTERM)
-	<-parar
+	// Graceful shutdown when Docker sends SIGTERM (e.g. during a new deployment)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
-	log.Info("API parada")
+	log.Info("API stopped")
 }
 
-// comCORS deixa os frontends locais (ex.: http://localhost:5173) chamar a API de staging.
-func comCORS(origens map[string]bool, next http.Handler) http.Handler {
+// withCORS lets the local frontends (e.g. http://localhost:5173) call the staging API.
+func withCORS(origins map[string]bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if o := r.Header.Get("Origin"); origens[o] {
+		if o := r.Header.Get("Origin"); origins[o] {
 			w.Header().Set("Access-Control-Allow-Origin", o)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
