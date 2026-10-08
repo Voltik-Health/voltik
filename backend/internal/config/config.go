@@ -1,5 +1,5 @@
-// Package config lê a configuração da API a partir de variáveis de ambiente.
-// Os valores reais vêm do .env de cada ambiente no servidor, nunca do Git.
+// Package config reads the API configuration from environment variables.
+// Real values come from each environment's .env file on the server, never from Git.
 package config
 
 import (
@@ -8,30 +8,30 @@ import (
 )
 
 type Config struct {
-	Ambiente    string          // local | staging | producao
-	Porta       string          // porta HTTP dentro do contentor
-	BaseDados   string          // URL de ligação, com o papel voltik_api
-	OrigensCORS map[string]bool // origens de frontend autorizadas
+	Environment string          // local | staging | production
+	Port        string          // HTTP port inside the container
+	DatabaseURL string          // connection URL, using the voltik_api role
+	CORSOrigins map[string]bool // frontend origins allowed to call the API
 }
 
-func Carregar() Config {
-	origens := map[string]bool{}
-	for _, o := range strings.Split(os.Getenv("CORS_ORIGENS"), ",") {
+func Load() Config {
+	origins := map[string]bool{}
+	for _, o := range strings.Split(os.Getenv("CORS_ORIGINS"), ",") {
 		if o = strings.TrimSpace(o); o != "" {
-			origens[o] = true
+			origins[o] = true
 		}
 	}
 	return Config{
-		Ambiente:    valorOu("AMBIENTE", "local"),
-		Porta:       valorOu("PORTA", "8080"),
-		BaseDados:   os.Getenv("DATABASE_URL"),
-		OrigensCORS: origens,
+		Environment: getOr("ENVIRONMENT", "local"),
+		Port:        getOr("PORT", "8080"),
+		DatabaseURL: os.Getenv("DATABASE_URL"),
+		CORSOrigins: origins,
 	}
 }
 
-func valorOu(chave, omissao string) string {
-	if v := os.Getenv(chave); v != "" {
+func getOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
 		return v
 	}
-	return omissao
+	return fallback
 }

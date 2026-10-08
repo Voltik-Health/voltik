@@ -2,22 +2,28 @@ openapi: 3.0.3
 info:
   title: Voltik API
   version: 0.1.0
-  description: Contrato único da API do Voltik, partilhado pelas apps Android e iOS e pelo portal web.
+  description: Single contract for the Voltik API, shared by the Android and iOS apps and the web portal.
 servers:
-  - url: http://localhost:8080/v1
-    description: Desenvolvimento
+  - url: https://staging-api.example.com/v1
+    description: Staging
 paths:
-  /saude:
+  /health:
     get:
-      summary: Verifica se a API está a funcionar
+      summary: Checks that the API is running
       responses:
         "200":
-          description: API operacional
+          description: API is up
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  estado:
+                  status:
                     type: string
                     example: ok
+                  environment:
+                    type: string
+                    example: staging
+                  version:
+                    type: string
+                    example: 3f2a9c1b7e44

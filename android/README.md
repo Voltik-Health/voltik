@@ -1,6 +1,6 @@
-# App Android (Kotlin + Jetpack Compose)
+# Android app (Kotlin + Jetpack Compose)
 
-Criar o projeto **dentro desta pasta** no Android Studio:
-*New Project → Empty Activity*, linguagem Kotlin, localização `.../voltik/android`.
+Create the project **inside this folder** in Android Studio:
+*New Project → Empty Activity*, language Kotlin, location `.../voltik/android`.
 
-Também é avaliada na UC de Computação Móvel.
+Two build flavours (`staging` and `production`) point to the matching API: see the getting-started guide, part 8.

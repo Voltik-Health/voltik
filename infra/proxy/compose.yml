@@ -1,6 +1,6 @@
-# Proxy HTTPS único para os dois ambientes. Arrancar uma vez no servidor:
+# Single HTTPS proxy for both environments. Start it once on the server:
 #   cd infra/proxy && docker compose up -d
-# Os certificados HTTPS (Let's Encrypt) são obtidos e renovados sozinhos.
+# HTTPS certificates (Let's Encrypt) are obtained and renewed automatically.
 services:
   caddy:
     image: caddy:2-alpine

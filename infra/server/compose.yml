@@ -1,8 +1,8 @@
 # =============================================================================
-# VOLTIK · serviços de um ambiente no servidor (staging OU produção)
-# Não se usa à mão: é chamado pelo infra/server/publicar.sh, com
-#   -p voltik-staging  ou  -p voltik-producao
-# Cada ambiente tem a sua base de dados, o seu volume e o seu .env.
+# VOLTIK · services of ONE environment on the server (staging OR production)
+# Not used by hand: infra/server/deploy.sh calls it with
+#   -p voltik-staging  or  -p voltik-production
+# Each environment has its own database, volume and .env file.
 # =============================================================================
 services:
   db:
@@ -10,14 +10,14 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?falta no .env}
-      VOLTIK_MIGRACOES_PASSWORD: ${VOLTIK_MIGRACOES_PASSWORD:?falta no .env}
-      VOLTIK_API_PASSWORD: ${VOLTIK_API_PASSWORD:?falta no .env}
-      VOLTIK_LEITURA_PASSWORD: ${VOLTIK_LEITURA_PASSWORD:?falta no .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?missing in .env}
+      VOLTIK_MIGRATIONS_PASSWORD: ${VOLTIK_MIGRATIONS_PASSWORD:?missing in .env}
+      VOLTIK_API_PASSWORD: ${VOLTIK_API_PASSWORD:?missing in .env}
+      VOLTIK_READONLY_PASSWORD: ${VOLTIK_READONLY_PASSWORD:?missing in .env}
       TZ: UTC
     ports:
-      # Só acessível no próprio servidor (DBeaver chega cá por túnel SSH)
-      - "127.0.0.1:${DB_PORTA_TUNEL:?falta no .env}:5432"
+      # Reachable only from the server itself (DBeaver gets here through an SSH tunnel)
+      - "127.0.0.1:${DB_TUNNEL_PORT:?missing in .env}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ${VOLTIK_DIR:?}/database/init:/docker-entrypoint-initdb.d:ro
@@ -26,11 +26,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-    networks: [interna]
+    networks: [internal]
 
   migrate:
     image: migrate/migrate:v4.20.1
-    profiles: ["ferramentas"]
+    profiles: ["tools"]
     depends_on:
       db:
         condition: service_healthy
@@ -39,30 +39,30 @@ services:
     entrypoint:
       - migrate
       - -path=/migrations
-      - -database=postgres://voltik_migracoes:${VOLTIK_MIGRACOES_PASSWORD}@db:5432/voltik?sslmode=disable
-    networks: [interna]
+      - -database=postgres://voltik_migrations:${VOLTIK_MIGRATIONS_PASSWORD}@db:5432/voltik?sslmode=disable
+    networks: [internal]
 
   api:
-    image: voltik-api:${VERSAO:?}
+    image: voltik-api:${VERSION:?}
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
-      AMBIENTE: ${AMBIENTE:?}
-      PORTA: "8080"
+      ENVIRONMENT: ${ENVIRONMENT:?}
+      PORT: "8080"
       DATABASE_URL: postgres://voltik_api:${VOLTIK_API_PASSWORD}@db:5432/voltik?sslmode=disable
-      CORS_ORIGENS: ${CORS_ORIGENS:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
     networks:
-      interna: {}
+      internal: {}
       proxy:
-        aliases: ["${AMBIENTE}-api"]   # o Caddy encontra-a como staging-api ou producao-api
+        aliases: ["${ENVIRONMENT}-api"]   # Caddy finds it as staging-api or production-api
 
 volumes:
   pgdata:
 
 networks:
-  interna: {}
+  internal: {}
   proxy:
     external: true
     name: voltik-proxy

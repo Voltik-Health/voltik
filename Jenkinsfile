@@ -1,8 +1,8 @@
 // =============================================================================
-// VOLTIK · pipeline (Multibranch Pipeline no Jenkins)
-//   qualquer ramo / PR -> testes (dentro do docker build do backend)
-//   ramo staging       -> publica automaticamente em staging
-//   ramo main          -> pede confirmação e publica em produção
+// VOLTIK · pipeline (Jenkins Multibranch Pipeline)
+//   any branch / PR  -> tests (run inside the backend docker build)
+//   staging branch   -> deploys to staging automatically
+//   main branch      -> asks for confirmation, then deploys to production
 // =============================================================================
 pipeline {
   agent any
@@ -11,30 +11,30 @@ pipeline {
     timestamps()
   }
   stages {
-    stage('Testes e imagem') {
+    stage('Test and build image') {
       steps {
         sh '''
-          VERSAO=$(git rev-parse --short=12 HEAD)
-          docker build --build-arg VERSAO=$VERSAO -t voltik-api:$VERSAO backend
+          VERSION=$(git rev-parse --short=12 HEAD)
+          docker build --build-arg VERSION=$VERSION -t voltik-api:$VERSION backend
         '''
       }
     }
-    stage('Publicar em staging') {
+    stage('Deploy to staging') {
       when { branch 'staging' }
       steps {
-        sh 'infra/server/publicar.sh staging $(git rev-parse --short=12 HEAD)'
+        sh 'infra/server/deploy.sh staging $(git rev-parse --short=12 HEAD)'
       }
     }
-    stage('Confirmar produção') {
+    stage('Confirm production') {
       when { branch 'main' }
       steps {
-        input message: 'Publicar esta versão em PRODUÇÃO?', ok: 'Publicar'
+        input message: 'Deploy this version to PRODUCTION?', ok: 'Deploy'
       }
     }
-    stage('Publicar em produção') {
+    stage('Deploy to production') {
       when { branch 'main' }
       steps {
-        sh 'infra/server/publicar.sh producao $(git rev-parse --short=12 HEAD)'
+        sh 'infra/server/deploy.sh production $(git rev-parse --short=12 HEAD)'
       }
     }
   }
