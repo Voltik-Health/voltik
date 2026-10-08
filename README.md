@@ -28,14 +28,14 @@ Rui Passos & Afonso Carvalho · CTeSP TPSI · IPMAIA · 2026
 | `database/` | Migrations, roles and sample data | PostgreSQL 17 + golang-migrate |
 | `infra/` | Server, HTTPS proxy and deployment scripts | Oracle Cloud, Docker, Caddy |
 | `scripts/` | Day-to-day helpers (send to staging, new migration) | Bash |
-| `docs/` | Guides, deliverables, diagrams and architecture decision records | |
+| `docs/` | Guides, diagrams and architecture decision records | |
 | `Jenkinsfile` | Pipeline: tests → staging → production | Jenkins |
 
 ## Team rules
 
 - `main` is production: it only receives code through a pull request approved by the other developer.
 - `staging` is the shared test environment: free push, any time.
-- Each task gets its own branch, created from `main`, named with the Jira key: `VOLT-42-meal-logging`.
+- Each task gets its own branch, created from `main`, named with the Jira key: `DVT-42-meal-logging`.
 - Pull requests to `main` always come from the **task branch**, never from `staging`.
 - The database schema only changes through a new migration (`./scripts/new-migration.sh`). Never by hand.
 - Sign-in is external only (Google, Microsoft, Apple, Facebook). Voltik never stores passwords.

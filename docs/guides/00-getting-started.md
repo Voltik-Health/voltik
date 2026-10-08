@@ -90,29 +90,39 @@ Mac: only the frontends (web, Android, iOS) run locally, pointing to the STAGING
    - `staging` gets **no rules**: free push, and it can be reset with `--force` when needed.
 7. **Settings → General → Pull Requests:** ✅ **Automatically delete head branches**.
 8. **Check:** a direct `git push` to `main` must be rejected with `GH013: Repository rule violations`.
-9. **Jira:** install the **GitHub for Jira** app and connect the repository. Commits and branches containing `VOLT-42` show up on the ticket.
+9. **Jira** (`voltik-cgm.atlassian.net`, project key `DVT`): install the **GitHub for Jira** app and connect the repository.
+   Branches, commits and pull requests whose name, message or title contain the ticket key (e.g. `DVT-42`) show up in the ticket's **Development** panel.
+   - Branch: `DVT-42-meal-logging` (or use **Create branch** on the ticket).
+   - Commit: `DVT-42 log meals by serving`.
+   - Pull request title: `DVT-42 Meal logging by serving`.
 
 ---
 
 ## Part 3 — Server setup (once)
 
+The server never keeps a copy of the repository. Jenkins builds the Docker image and `deploy.sh` copies only what the server needs to `/opt/voltik` (migrations, `compose.yml`, operational scripts, proxy configuration).
+
+| Folder on the server | Contents | Written by |
+|---|---|---|
+| `/opt/voltik/staging/`, `/opt/voltik/production/` | `.env` (passwords) + `database/` (migrations) | You (`.env`), Jenkins (`database/`) |
+| `/opt/voltik/bin/` | `compose.yml`, `reset-staging.sh`, `backup-production.sh` | Jenkins |
+| `/opt/voltik/proxy/` | Caddy configuration + `.env` (domains) | Jenkins, you (`.env`) |
+| `/opt/voltik/backups/` | Daily production backups | Cron |
+
 1. **Log in to the server:**
    ```bash
    ssh ubuntu@SERVER_IP
    ```
-2. **Clone the repository** to `/opt/voltik/repo` (to run the scripts):
+2. **Install Docker, folders, network and firewall rules** (download only the setup script):
    ```bash
-   sudo mkdir -p /opt/voltik && sudo chown ubuntu: /opt/voltik
-   git clone https://github.com/OWNER/voltik.git /opt/voltik/repo
-   ```
-3. **Install Docker, network, folders and firewall rules:**
-   ```bash
-   sudo /opt/voltik/repo/infra/server/setup-server.sh
+   curl -fsSLO https://raw.githubusercontent.com/OWNER/REPO/main/infra/server/setup-server.sh
+   sudo bash setup-server.sh && rm setup-server.sh
    sudo usermod -aG docker ubuntu     # log out and back in to SSH afterwards
+   docker run --rm hello-world        # after logging back in: must print "Hello from Docker!"
    ```
-4. **Open 80 and 443 on Oracle:** web console → **Networking → Virtual Cloud Networks → (the VCN) → Security Lists → Add Ingress Rules**: TCP 80 and TCP 443 from `0.0.0.0/0`.
+3. **Open 80 and 443 on Oracle:** web console → **Networking → Virtual Cloud Networks → (the VCN) → Security Lists → Add Ingress Rules**: TCP 80 and TCP 443 from `0.0.0.0/0`.
    **Do not open** 5432, 5433, 5434 or 8080.
-5. **Check the region** of the instance (top of the console). For real health data it must be in the EU.
+4. **Check the region** of the instance (top of the console). For real health data it must be in the EU.
 
 ---
 
@@ -123,39 +133,52 @@ Mac: only the frontends (web, Android, iOS) run locally, pointing to the STAGING
    - `api.1-2-3-4.sslip.io`
 
    Later, with your own domain (around €10 a year), only these two values change.
-2. **Configure and start the proxy:**
+2. **Create the proxy settings** (email for the HTTPS certificates + the two addresses):
    ```bash
-   cd /opt/voltik/repo/infra/proxy
-   cp env.example .env && nano .env      # email + the two addresses
-   docker compose up -d
+   sudo tee /opt/voltik/proxy/.env > /dev/null <<'ENV'
+   ACME_EMAIL=your@email
+   STAGING_DOMAIN=staging-api.1-2-3-4.sslip.io
+   PRODUCTION_DOMAIN=api.1-2-3-4.sslip.io
+   ENV
    ```
-   Caddy obtains and renews the HTTPS certificates on its own. Until an API is deployed the addresses answer with a 502 error: that is expected.
+   Every deployment starts or reloads the proxy. Caddy obtains and renews the HTTPS certificates on its own.
 
 ---
 
-## Part 5 — Staging and production databases
+## Part 5 — Database passwords (staging and production)
 
 Each environment has **its own** database, in a separate Docker project, with **different** passwords.
 
-1. **Create both `.env` files:**
+1. **Generate 8 passwords** (4 per environment), running this 8 times:
    ```bash
-   cp /opt/voltik/repo/infra/server/env.staging.example    /opt/voltik/staging/.env
-   cp /opt/voltik/repo/infra/server/env.production.example /opt/voltik/production/.env
-   chmod 600 /opt/voltik/*/.env
-   openssl rand -hex 24          # run once per password
-   nano /opt/voltik/staging/.env
-   nano /opt/voltik/production/.env
+   openssl rand -hex 24
    ```
-   Also store the passwords in the shared Bitwarden vault.
-2. **Nothing has to be created by hand.** On the first deployment (part 6), `deploy.sh`:
-   - starts PostgreSQL and creates the `voltik` database and the three roles (`database/init/01-roles.sh`);
+   Store them in the shared Bitwarden vault.
+2. **Create both `.env` files** (the templates are `infra/server/env.*.example` in the repository):
+   ```bash
+   sudo nano /opt/voltik/staging/.env
+   ```
+   ```
+   POSTGRES_PASSWORD=...
+   VOLTIK_MIGRATIONS_PASSWORD=...
+   VOLTIK_API_PASSWORD=...
+   VOLTIK_READONLY_PASSWORD=...
+   DB_TUNNEL_PORT=5433
+   CORS_ORIGINS=http://localhost:5173
+   ```
+   Save with **Ctrl+O**, **Enter**, **Ctrl+X**. Then the same for `/opt/voltik/production/.env`, with **different** passwords, `DB_TUNNEL_PORT=5434` and `CORS_ORIGINS=https://app.YOUR-DOMAIN`.
+   ```bash
+   sudo chmod 600 /opt/voltik/*/.env
+   ```
+3. **Nothing else is created by hand.** On the first deployment of each environment (part 6), `deploy.sh`:
+   - starts PostgreSQL, which creates the `voltik` database and the three roles (`database/init/01-roles.sh`);
    - applies every migration as `voltik_migrations`;
    - starts the API as `voltik_api`.
-3. **Production backups** (after the first production deployment):
+4. **Production backups** (after the first production deployment):
    ```bash
-   crontab -e
+   sudo crontab -e
    # add:
-   30 3 * * * /opt/voltik/repo/infra/server/backup-production.sh >> /opt/voltik/backups/backup.log 2>&1
+   30 3 * * * /opt/voltik/bin/backup-production.sh >> /opt/voltik/backups/backup.log 2>&1
    ```
    Copying backups off the server (Oracle Object Storage) is still to do. It is marked in the script.
 
@@ -168,7 +191,7 @@ Each environment has **its own** database, in a separate Docker project, with **
 2. **Give it access to Docker and the folders:**
    ```bash
    sudo usermod -aG docker jenkins
-   sudo chown -R jenkins: /opt/voltik/staging /opt/voltik/production
+   sudo chown -R jenkins: /opt/voltik/staging /opt/voltik/production /opt/voltik/bin /opt/voltik/proxy
    sudo systemctl restart jenkins
    ```
 3. **Open the UI without exposing it to the Internet**, through an SSH tunnel from the Mac:
@@ -182,16 +205,16 @@ Each environment has **its own** database, in a separate Docker project, with **
    - *Build Configuration*: `Jenkinsfile`.
    - *Scan Multibranch Pipeline Triggers*: ✅ **Periodically if not otherwise run**, every **1 minute**.
      (Jenkins checks for changes itself, so it never has to be exposed to receive webhooks.)
-6. **First staging deployment:** in Jenkins, open the `staging` branch → **Build Now**. Then, on the Mac:
+6. **First staging deployment:** in Jenkins, open the `staging` branch → **Build Now**. This also creates the staging database. Then, on the Mac:
    ```bash
    curl https://staging-api.1-2-3-4.sslip.io/v1/health
    # {"environment":"staging","status":"ok","version":"..."}
    ```
-7. **First production deployment:** open the `main` branch → **Build Now** → click **Deploy** when Jenkins asks for confirmation.
-8. **Fictitious data on staging:**
+7. **Fictitious data on staging** (on the server):
    ```bash
-   /opt/voltik/repo/infra/server/reset-staging.sh
+   sudo /opt/voltik/bin/reset-staging.sh
    ```
+8. **First production deployment:** open the `main` branch → **Build Now** → click **Deploy** when Jenkins asks for confirmation. This creates the (empty) production database.
 
 ---
 
@@ -256,11 +279,11 @@ In code: `BuildConfig.API_URL`.
 1. **New task**, always from an up-to-date `main`:
    ```bash
    git switch main && git pull
-   git switch -c VOLT-42-meal-logging
+   git switch -c DVT-42-meal-logging
    ```
 2. **Code and commit** (in English, with the Jira key in the message):
    ```bash
-   git commit -am "VOLT-42 log meals by serving"
+   git commit -am "DVT-42 log meals by serving"
    ```
 3. **Test on the server**, no approval needed, whenever you want:
    ```bash
@@ -276,7 +299,7 @@ In code: `BuildConfig.API_URL`.
 - New schema change: `./scripts/new-migration.sh change_name`, then write the `.up.sql` and the `.down.sql`.
 - It goes to staging with the rest of the code, and only reaches production after the PR is approved.
 - A migration that has already run on staging is never edited: fix it with another migration.
-- If staging gets tangled with migrations from abandoned branches: `infra/server/reset-staging.sh` on the server.
+- If staging gets tangled with migrations from abandoned branches: `sudo /opt/voltik/bin/reset-staging.sh` on the server.
 
 **Periodic staging reset.** Every so often (for example at the end of each sprint), realign `staging` with `main`:
 ```bash
@@ -285,7 +308,7 @@ git reset --hard origin/main
 git push --force origin staging
 git switch -
 ```
-If there are abandoned migrations, also run `reset-staging.sh` on the server.
+If there are abandoned migrations, also run `sudo /opt/voltik/bin/reset-staging.sh` on the server.
 
 ---
 

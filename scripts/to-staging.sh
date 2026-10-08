@@ -8,7 +8,7 @@ set -euo pipefail
 
 BRANCH="$(git branch --show-current)"
 case "$BRANCH" in
-  main|staging) echo "Run this from your task branch (e.g. VOLT-42-...)."; exit 1;;
+  main|staging) echo "Run this from your task branch (e.g. DVT-42-...)."; exit 1;;
 esac
 git diff --quiet && git diff --cached --quiet || { echo "You have uncommitted changes."; exit 1; }
 
