@@ -1,0 +1,2074 @@
+openapi: 3.1.0
+info:
+  title: Voltik API
+  version: 0.1.0
+  summary: REST contract between the Voltik apps and the Go API.
+  description: |
+    Contract between the Voltik clients (Android app and web portal) and the Go API.
+    The apps are built against the mock server, which answers with the examples in
+    this file, and the backend implements the same contract. `api/README.md`
+    explains how to run the mock server and the linter.
+
+    This version covers group 1 of DVT-76 (base). Groups 2 (diary, history, care
+    team) and 3 (Iris, telemedicine, Dexcom) are added in later pull requests,
+    before the tickets that use them start.
+
+    ## Conventions
+
+    - **Authentication.** Users sign in with Google, Microsoft, Apple or
+      Facebook, one `POST /v1/auth/...` endpoint per provider. All four return
+      the same Voltik session token, valid for 7 days. Every other endpoint
+      except `GET /v1/health` needs `Authorization: Bearer <token>`. There is no
+      refresh token: on a 401, get a new token from the same provider and sign
+      in again. Signing out happens on the client: forget the token and
+      unregister the push token.
+    - **One email, one account.** Signing in with a provider whose email
+      already has an account under another provider answers 409
+      `email_in_use`: the user must sign in the same way as the first time.
+    - **Field names** follow the database (`value_mg_dl`, `measured_at`,
+      `idempotency_key`, ...). Responses always include every field, and a field
+      without a value is `null`. In `PATCH` requests, leave a field out to keep
+      it and send `null` to clear it.
+    - **Times.** Instants are RFC 3339 in UTC, e.g. `2026-10-16T09:30:00Z`.
+      Calendar dates are `YYYY-MM-DD`. Glucose is always in mg/dL.
+    - **Lists** are always an object with `items`, never a bare array. Paginated
+      lists also return `next_cursor` (`null` on the last page) and accept
+      `limit` and `cursor`: send `next_cursor` back as `cursor` to get the next
+      page.
+    - **Errors** have the shape `{code, message, details}`. Clients branch on
+      `code`, a stable snake_case string, and show their own translated text.
+      `message` is in English and meant for developers. `details` lists the
+      fields that failed and is empty otherwise. New codes may be added, so
+      treat an unknown code as a generic error.
+    - **Patient data.** Endpoints under `/v1/me/` that read or write health data
+      answer 404 `patient_profile_not_found` until the user completes onboarding
+      with `POST /v1/me/patient`.
+    - **Latest values.** The `.../latest` endpoints answer 204 (no body) while
+      there is no data yet.
+
+    ## Error codes
+
+    | Status | `code` | When |
+    | --- | --- | --- |
+    | 400 | `invalid_request` | Malformed JSON, wrong types or missing parameters |
+    | 400 | `validation_failed` | One or more fields break a rule (see `details`) |
+    | 400 | `email_required` | The identity provider did not share an email address |
+    | 401 | `unauthenticated` | Session token missing, invalid or expired |
+    | 401 | `invalid_provider_token` | The identity provider rejected the token |
+    | 403 | `account_disabled` | The account is suspended or deactivated |
+    | 404 | `not_found` | The resource does not exist or belongs to someone else |
+    | 404 | `patient_profile_not_found` | Patient onboarding not completed |
+    | 409 | `email_in_use` | The email already has an account under another provider |
+    | 409 | `patient_profile_exists` | Patient onboarding already completed |
+    | 409 | `mandatory_consent` | Mandatory consents cannot be revoked |
+    | 429 | `rate_limited` | Too many requests; retry after the `Retry-After` header |
+    | 500 | `internal_error` | Unexpected server error |
+    | 503 | `service_unavailable` | The database or another dependency is down |
+
+servers:
+  # The public staging/production URL is added by DVT-77 once the domain exists.
+  - url: http://localhost:4010
+    description: Prism mock server (see api/README.md)
+  - url: http://localhost:8080
+    description: Go API running on your machine
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: System
+    description: Service status.
+  - name: Auth
+    description: Sign-in with Google, Microsoft, Apple or Facebook. Voltik never stores passwords.
+  - name: Account
+    description: The signed-in user, whatever their profile type.
+  - name: Consents
+    description: GDPR consents the user has accepted or revoked.
+  - name: Push tokens
+    description: Phones and browsers that receive push notifications (FCM on Android and web, APNs on iOS).
+  - name: Patient
+    description: Patient profile, created during onboarding.
+  - name: Glucose
+    description: Glucose readings from CGM sensors, meters and health platforms.
+  - name: Heart rate
+    description: Heart rate samples from watches and bands.
+  - name: Alerts
+    description: Glucose and sensor alerts raised for the patient.
+  - name: Devices
+    description: Sensors, meters, watches and bands linked to the patient.
+
+paths:
+  /v1/health:
+    get:
+      tags: [System]
+      operationId: getHealth
+      summary: Check that the API is up
+      description: Public. Used by the deployment pipeline and by monitoring.
+      security: []
+      responses:
+        '200':
+          description: The API and its database are up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: ok
+                environment: staging
+                version: cbae46e
+        '503':
+          description: The API is running but cannot reach the database.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: service_unavailable
+                message: The database is not reachable.
+                details: []
+
+  /v1/auth/google:
+    post:
+      tags: [Auth]
+      operationId: signInWithGoogle
+      summary: Sign in with Google
+      description: |
+        The client gets an ID token from Google (Credential Manager on Android,
+        Google Identity Services on the web) and exchanges it here for a Voltik
+        session token.
+
+        Rules shared by the four sign-in endpoints:
+        - The first sign-in creates the user. While `profile_types` is empty,
+          the app shows the onboarding choice.
+        - An email belongs to one account. If it already has an account under
+          another provider, the API answers 409 `email_in_use`.
+        - If the provider does not share an email address, the API answers 400
+          `email_required`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GoogleSignInRequest'
+            example:
+              id_token: eyJhbGciOiJSUzI1NiIsImtpZCI6Im1vY2sifQ.mock-google-payload.mock-signature
+      responses:
+        '200':
+          $ref: '#/components/responses/SignedIn'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/InvalidProviderToken'
+        '403':
+          $ref: '#/components/responses/AccountDisabled'
+        '409':
+          $ref: '#/components/responses/EmailInUse'
+
+  /v1/auth/microsoft:
+    post:
+      tags: [Auth]
+      operationId: signInWithMicrosoft
+      summary: Sign in with Microsoft
+      description: |
+        The client signs in with MSAL (personal or work Microsoft account) and
+        exchanges the ID token here for a Voltik session token. Same rules as
+        `POST /v1/auth/google`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MicrosoftSignInRequest'
+            example:
+              id_token: eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6Im1vY2sifQ.mock-microsoft-payload.mock-signature
+      responses:
+        '200':
+          $ref: '#/components/responses/SignedIn'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/InvalidProviderToken'
+        '403':
+          $ref: '#/components/responses/AccountDisabled'
+        '409':
+          $ref: '#/components/responses/EmailInUse'
+
+  /v1/auth/apple:
+    post:
+      tags: [Auth]
+      operationId: signInWithApple
+      summary: Sign in with Apple
+      description: |
+        The client signs in with Sign in with Apple (Sign in with Apple JS on the
+        web, a web sign-in inside the app on Android) and exchanges the identity
+        token here for a Voltik session token. Same rules as
+        `POST /v1/auth/google`.
+
+        Apple shares the user's name only on the first sign-in, and not inside
+        the token, so send `full_name` that time. The email may be an Apple relay
+        address (`...@privaterelay.appleid.com`).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppleSignInRequest'
+            example:
+              id_token: eyJraWQiOiJtb2NrIiwiYWxnIjoiUlMyNTYifQ.mock-apple-payload.mock-signature
+              full_name: Manuel Sousa
+      responses:
+        '200':
+          $ref: '#/components/responses/SignedIn'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/InvalidProviderToken'
+        '403':
+          $ref: '#/components/responses/AccountDisabled'
+        '409':
+          $ref: '#/components/responses/EmailInUse'
+
+  /v1/auth/facebook:
+    post:
+      tags: [Auth]
+      operationId: signInWithFacebook
+      summary: Sign in with Facebook
+      description: |
+        The client signs in with Facebook Login and sends the user access token,
+        because on Android and the web Facebook gives no ID token. The API checks
+        the token with the Graph API and asks Facebook for the name and email.
+        Same rules as `POST /v1/auth/google`. A Facebook account that does not
+        share its email gets 400 `email_required`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FacebookSignInRequest'
+            example:
+              access_token: EAAmockFacebookUserAccessToken
+      responses:
+        '200':
+          $ref: '#/components/responses/SignedIn'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/InvalidProviderToken'
+        '403':
+          $ref: '#/components/responses/AccountDisabled'
+        '409':
+          $ref: '#/components/responses/EmailInUse'
+
+  /v1/me:
+    get:
+      tags: [Account]
+      operationId: getMe
+      summary: Get the signed-in user
+      description: |
+        `profile_types` tells the app which area to open: patient, caregiver or
+        clinician. An empty list means onboarding is not done yet.
+      responses:
+        '200':
+          description: The signed-in user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+              example:
+                id: 20000000-0000-4000-8000-000000000001
+                email: manuel.sousa@example.com
+                full_name: Manuel Sousa
+                phone: '+351912345678'
+                profile_photo_url: https://lh3.googleusercontent.com/a/mock-photo
+                account_status: active
+                profile_types: [patient]
+                created_at: '2026-10-01T08:12:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+    patch:
+      tags: [Account]
+      operationId: updateMe
+      summary: Update the signed-in user's name or phone
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MeUpdate'
+            example:
+              phone: '+351912345678'
+      responses:
+        '200':
+          description: The updated user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+              example:
+                id: 20000000-0000-4000-8000-000000000001
+                email: manuel.sousa@example.com
+                full_name: Manuel Sousa
+                phone: '+351912345678'
+                profile_photo_url: https://lh3.googleusercontent.com/a/mock-photo
+                account_status: active
+                profile_types: [patient]
+                created_at: '2026-10-01T08:12:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+    delete:
+      tags: [Account]
+      operationId: deleteMe
+      summary: Delete the account
+      description: |
+        Takes effect immediately: the session token stops working, the sign-in
+        providers are unlinked (the person can sign up again later) and push
+        tokens are removed. Health data is erased after the 30-day retention period and
+        the user record is anonymised (DVT-78).
+      responses:
+        '204':
+          description: Account deleted.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /v1/me/consents:
+    get:
+      tags: [Consents]
+      operationId: listConsents
+      summary: List the user's consents
+      description: Every consent the user accepted, newest first, including revoked ones.
+      responses:
+        '200':
+          description: The user's consents.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConsentList'
+              example:
+                items:
+                  - consent_type: external_ai_processing
+                    document_version: '1.0'
+                    created_at: '2026-10-02T18:40:00Z'
+                    revoked_at: null
+                  - consent_type: health_data_processing
+                    document_version: '1.0'
+                    created_at: '2026-10-01T08:15:00Z'
+                    revoked_at: null
+                  - consent_type: terms_of_service
+                    document_version: '1.0'
+                    created_at: '2026-10-01T08:15:00Z'
+                    revoked_at: null
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+    post:
+      tags: [Consents]
+      operationId: acceptConsent
+      summary: Accept a consent
+      description: |
+        Records that the user accepted a version of a consent document. Accepting a
+        version that is already active returns it unchanged (200). Patients accept
+        `terms_of_service` and `health_data_processing` during onboarding
+        (`POST /v1/me/patient`). Iris asks for `external_ai_processing` on first use.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConsentAcceptance'
+            example:
+              consent_type: external_ai_processing
+              document_version: '1.0'
+      responses:
+        '200':
+          description: This version was already accepted. Nothing changed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Consent'
+              example:
+                consent_type: external_ai_processing
+                document_version: '1.0'
+                created_at: '2026-10-02T18:40:00Z'
+                revoked_at: null
+        '201':
+          description: Consent recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Consent'
+              example:
+                consent_type: external_ai_processing
+                document_version: '1.0'
+                created_at: '2026-10-16T10:05:00Z'
+                revoked_at: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /v1/me/consents/{consent_type}:
+    delete:
+      tags: [Consents]
+      operationId: revokeConsent
+      summary: Revoke a consent
+      description: |
+        Revokes the active consent of this type. `terms_of_service` and
+        `health_data_processing` cannot be revoked (409): the app offers to delete
+        the account instead.
+      parameters:
+        - $ref: '#/components/parameters/ConsentTypePath'
+      responses:
+        '204':
+          description: Consent revoked.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Mandatory consents cannot be revoked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: mandatory_consent
+                message: health_data_processing cannot be revoked. Delete the account instead.
+                details: []
+
+  /v1/me/push-tokens:
+    post:
+      tags: [Push tokens]
+      operationId: registerPushToken
+      summary: Register this device for push notifications
+      description: |
+        Call it after sign-in and whenever FCM or APNs gives the app a new token.
+        A token that is already registered is returned as it is (200). If it
+        belonged to another user of the same phone, it moves to the caller.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PushTokenRegistration'
+            example:
+              platform: android
+              push_token: fcm-mock-token-dGVzdC1kZXZpY2UtMDE
+      responses:
+        '200':
+          description: The token was already registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PushToken'
+              example:
+                id: 90000000-0000-4000-8000-000000000001
+                platform: android
+                is_active: true
+                created_at: '2026-10-01T08:16:00Z'
+                updated_at: '2026-10-16T09:00:00Z'
+        '201':
+          description: Token registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PushToken'
+              example:
+                id: 90000000-0000-4000-8000-000000000001
+                platform: android
+                is_active: true
+                created_at: '2026-10-16T09:00:00Z'
+                updated_at: '2026-10-16T09:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /v1/me/push-tokens/{push_token_id}:
+    delete:
+      tags: [Push tokens]
+      operationId: unregisterPushToken
+      summary: Stop push notifications on this device
+      description: Call it on sign-out.
+      parameters:
+        - $ref: '#/components/parameters/PushTokenId'
+      responses:
+        '204':
+          description: The device no longer receives push notifications.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/me/patient:
+    post:
+      tags: [Patient]
+      operationId: createPatientProfile
+      summary: Complete patient onboarding
+      description: |
+        Creates the patient profile and records the consents in one step.
+        `consents` must include `terms_of_service` and `health_data_processing`.
+        Thresholds that are left out take the defaults: target 70–180 mg/dL,
+        critical 55 and 250 mg/dL.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatientCreate'
+            example:
+              birth_date: '1968-03-02'
+              occupation: Metalworker
+              diabetes_type: type_1
+              current_therapy: multiple_daily_injections
+              consents:
+                - consent_type: terms_of_service
+                  document_version: '1.0'
+                - consent_type: health_data_processing
+                  document_version: '1.0'
+      responses:
+        '201':
+          description: Patient profile created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Patient'
+              example:
+                id: 30000000-0000-4000-8000-000000000001
+                birth_date: '1968-03-02'
+                gender: null
+                occupation: Metalworker
+                diabetes_type: type_1
+                current_therapy: multiple_daily_injections
+                target_min_mg_dl: 70
+                target_max_mg_dl: 180
+                critical_low_mg_dl: 55
+                critical_high_mg_dl: 250
+                weight_kg: null
+                height_cm: null
+                created_at: '2026-10-01T08:15:00Z'
+                updated_at: '2026-10-01T08:15:00Z'
+        '400':
+          description: A field is not valid or a mandatory consent is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: validation_failed
+                message: Some fields are not valid.
+                details:
+                  - field: consents
+                    issue: must include health_data_processing
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '409':
+          description: The user already has a patient profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: patient_profile_exists
+                message: This user already has a patient profile.
+                details: []
+    get:
+      tags: [Patient]
+      operationId: getPatientProfile
+      summary: Get the patient profile
+      responses:
+        '200':
+          description: The patient profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Patient'
+              example:
+                id: 30000000-0000-4000-8000-000000000001
+                birth_date: '1968-03-02'
+                gender: null
+                occupation: Metalworker
+                diabetes_type: type_1
+                current_therapy: multiple_daily_injections
+                target_min_mg_dl: 70
+                target_max_mg_dl: 180
+                critical_low_mg_dl: 55
+                critical_high_mg_dl: 250
+                weight_kg: 82.5
+                height_cm: 174
+                created_at: '2026-10-01T08:15:00Z'
+                updated_at: '2026-10-03T19:02:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+    patch:
+      tags: [Patient]
+      operationId: updatePatientProfile
+      summary: Update the patient profile
+      description: |
+        Changes only the fields sent. After the change, the thresholds must keep
+        the order `critical_low_mg_dl < target_min_mg_dl < target_max_mg_dl <
+        critical_high_mg_dl`. Otherwise the API answers 400 and lists the fields
+        involved in `details`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatientUpdate'
+            example:
+              target_min_mg_dl: 80
+              weight_kg: 81.5
+      responses:
+        '200':
+          description: The updated patient profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Patient'
+              example:
+                id: 30000000-0000-4000-8000-000000000001
+                birth_date: '1968-03-02'
+                gender: null
+                occupation: Metalworker
+                diabetes_type: type_1
+                current_therapy: multiple_daily_injections
+                target_min_mg_dl: 80
+                target_max_mg_dl: 180
+                critical_low_mg_dl: 55
+                critical_high_mg_dl: 250
+                weight_kg: 81.5
+                height_cm: 174
+                created_at: '2026-10-01T08:15:00Z'
+                updated_at: '2026-10-16T10:12:00Z'
+        '400':
+          description: A field is not valid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: validation_failed
+                message: Some fields are not valid.
+                details:
+                  - field: target_min_mg_dl
+                    issue: must be lower than target_max_mg_dl
+                  - field: target_max_mg_dl
+                    issue: must be higher than target_min_mg_dl
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/glucose-readings:
+    get:
+      tags: [Glucose]
+      operationId: listGlucoseReadings
+      summary: List glucose readings in a time range
+      description: Readings with `from <= measured_at < to`, oldest first, ready for a chart.
+      parameters:
+        - $ref: '#/components/parameters/RangeFrom'
+        - $ref: '#/components/parameters/RangeTo'
+        - $ref: '#/components/parameters/TimeSeriesLimit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of readings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlucoseReadingPage'
+              example:
+                items:
+                  - id: 184201
+                    measured_at: '2026-10-16T09:15:00Z'
+                    value_mg_dl: 128
+                    trend: stable
+                    source: cgm_sensor
+                    device_id: 50000000-0000-4000-8000-000000000001
+                    signal_quality: 100
+                    idempotency_key: 5e0b1c2d-3a4f-4b6c-9d7e-8f9a0b1c2d3e
+                    created_at: '2026-10-16T09:15:04Z'
+                  - id: 184202
+                    measured_at: '2026-10-16T09:20:00Z'
+                    value_mg_dl: 119
+                    trend: falling
+                    source: cgm_sensor
+                    device_id: 50000000-0000-4000-8000-000000000001
+                    signal_quality: 100
+                    idempotency_key: 6f1c2d3e-4b5a-4c6d-8e7f-901a2b3c4d5e
+                    created_at: '2026-10-16T09:20:03Z'
+                  - id: 184203
+                    measured_at: '2026-10-16T09:25:00Z'
+                    value_mg_dl: 108
+                    trend: falling
+                    source: cgm_sensor
+                    device_id: 50000000-0000-4000-8000-000000000001
+                    signal_quality: 98
+                    idempotency_key: 7a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                    created_at: '2026-10-16T09:25:05Z'
+                next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/glucose-readings/batch:
+    post:
+      tags: [Glucose]
+      operationId: ingestGlucoseReadings
+      summary: Upload a batch of glucose readings
+      description: |
+        Uploads up to 500 readings, usually the app's offline queue. Safe to retry.
+
+        - Each reading has an `idempotency_key` created on the phone. A key that
+          was already stored counts in `duplicates` and changes nothing.
+        - Valid readings are stored even when others in the batch are not. The
+          invalid ones come back in `rejected`, with their position in the request.
+        - After a 200, every reading in the batch is either stored or permanently
+          rejected, so the app can remove the whole batch from its queue.
+        - A malformed request (not JSON, no `readings`, more than 500 items) gets
+          a 400 and nothing is stored.
+
+        Rejection codes: `validation_failed` (a field breaks a rule),
+        `unknown_device` (`device_id` is not one of the patient's devices) and
+        `measured_at_in_future` (more than 5 minutes ahead of the server clock).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GlucoseReadingBatch'
+            example:
+              readings:
+                - idempotency_key: 6f1c2d3e-4b5a-4c6d-8e7f-901a2b3c4d5e
+                  measured_at: '2026-10-16T09:20:00Z'
+                  value_mg_dl: 119
+                  trend: falling
+                  source: cgm_sensor
+                  device_id: 50000000-0000-4000-8000-000000000001
+                - idempotency_key: 7a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                  measured_at: '2026-10-16T09:25:00Z'
+                  value_mg_dl: 108
+                  trend: falling
+                  source: cgm_sensor
+                  device_id: 50000000-0000-4000-8000-000000000001
+      responses:
+        '200':
+          description: Batch processed. The counts say what happened to each reading.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResult'
+              example:
+                inserted: 1
+                duplicates: 1
+                rejected: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/glucose-readings/latest:
+    get:
+      tags: [Glucose]
+      operationId: getLatestGlucoseReading
+      summary: Get the most recent glucose reading
+      description: For the home screen. Answers 204 while the patient has no readings.
+      responses:
+        '200':
+          description: The most recent reading.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlucoseReading'
+              example:
+                id: 184203
+                measured_at: '2026-10-16T09:25:00Z'
+                value_mg_dl: 108
+                trend: falling
+                source: cgm_sensor
+                device_id: 50000000-0000-4000-8000-000000000001
+                signal_quality: 98
+                idempotency_key: 7a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                created_at: '2026-10-16T09:25:05Z'
+        '204':
+          description: No readings yet.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/heart-rate:
+    get:
+      tags: [Heart rate]
+      operationId: listHeartRateSamples
+      summary: List heart rate samples in a time range
+      description: Samples with `from <= measured_at < to`, oldest first.
+      parameters:
+        - $ref: '#/components/parameters/RangeFrom'
+        - $ref: '#/components/parameters/RangeTo'
+        - $ref: '#/components/parameters/TimeSeriesLimit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of samples.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeartRateSamplePage'
+              example:
+                items:
+                  - id: 520114
+                    measured_at: '2026-10-16T09:20:00Z'
+                    bpm: 92
+                    device_id: 50000000-0000-4000-8000-000000000002
+                    created_at: '2026-10-16T09:30:12Z'
+                  - id: 520115
+                    measured_at: '2026-10-16T09:25:00Z'
+                    bpm: 97
+                    device_id: 50000000-0000-4000-8000-000000000002
+                    created_at: '2026-10-16T09:30:12Z'
+                next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/heart-rate/batch:
+    post:
+      tags: [Heart rate]
+      operationId: ingestHeartRateSamples
+      summary: Upload a batch of heart rate samples
+      description: |
+        Same rules as `POST /v1/me/glucose-readings/batch`: up to 500 samples,
+        idempotent through `idempotency_key`, and partial acceptance.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeartRateSampleBatch'
+            example:
+              samples:
+                - idempotency_key: hc-3f9a1c2e-20261016T092000Z
+                  measured_at: '2026-10-16T09:20:00Z'
+                  bpm: 92
+                  device_id: 50000000-0000-4000-8000-000000000002
+                - idempotency_key: hc-3f9a1c2e-20261016T092500Z
+                  measured_at: '2026-10-16T09:25:00Z'
+                  bpm: 97
+                  device_id: 50000000-0000-4000-8000-000000000002
+      responses:
+        '200':
+          description: Batch processed. The counts say what happened to each sample.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResult'
+              example:
+                inserted: 2
+                duplicates: 0
+                rejected: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/heart-rate/latest:
+    get:
+      tags: [Heart rate]
+      operationId: getLatestHeartRateSample
+      summary: Get the most recent heart rate sample
+      description: For the home screen. Answers 204 while the patient has no watch data.
+      responses:
+        '200':
+          description: The most recent sample.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeartRateSample'
+              example:
+                id: 520115
+                measured_at: '2026-10-16T09:25:00Z'
+                bpm: 97
+                device_id: 50000000-0000-4000-8000-000000000002
+                created_at: '2026-10-16T09:30:12Z'
+        '204':
+          description: No heart rate data yet.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/alerts:
+    get:
+      tags: [Alerts]
+      operationId: listAlerts
+      summary: List the patient's alerts
+      description: Newest first, by `triggered_at`.
+      parameters:
+        - name: ack_status
+          in: query
+          description: Only alerts in this state, e.g. `pending` for the banner on the home screen.
+          schema:
+            $ref: '#/components/schemas/AlertAckStatus'
+        - name: from
+          in: query
+          description: Only alerts triggered at or after this instant.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: Only alerts triggered before this instant.
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/ListLimit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of alerts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertPage'
+              example:
+                items:
+                  - id: 80000000-0000-4000-8000-000000000002
+                    alert_type: critical_low
+                    severity: critical
+                    title: Glicemia muito baixa
+                    message: A glicemia está em 52 mg/dL e a descer.
+                    iris_suggested_action: Coma 15 g de hidratos de carbono de absorção rápida e volte a medir dentro de 15 minutos.
+                    triggered_at: '2026-10-15T16:42:00Z'
+                    ack_status: acknowledged
+                    acknowledged_at: '2026-10-15T16:43:10Z'
+                    acknowledged_by_user_id: 20000000-0000-4000-8000-000000000001
+                    resolution_notes: null
+                    source_reading_id: 183950
+                    source_prediction_id: null
+                    created_at: '2026-10-15T16:42:01Z'
+                  - id: 80000000-0000-4000-8000-000000000001
+                    alert_type: sensor_expiring
+                    severity: info
+                    title: Sensor a expirar
+                    message: O sensor expira amanhã às 08:00.
+                    iris_suggested_action: null
+                    triggered_at: '2026-10-14T08:00:00Z'
+                    ack_status: pending
+                    acknowledged_at: null
+                    acknowledged_by_user_id: null
+                    resolution_notes: null
+                    source_reading_id: null
+                    source_prediction_id: null
+                    created_at: '2026-10-14T08:00:00Z'
+                next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/alerts/{alert_id}/acknowledge:
+    post:
+      tags: [Alerts]
+      operationId: acknowledgeAlert
+      summary: Acknowledge an alert
+      description: |
+        Marks a pending alert as acknowledged by the caller. Acknowledging an alert
+        that is no longer pending returns it unchanged.
+      parameters:
+        - $ref: '#/components/parameters/AlertId'
+      responses:
+        '200':
+          description: The alert after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alert'
+              example:
+                id: 80000000-0000-4000-8000-000000000001
+                alert_type: sensor_expiring
+                severity: info
+                title: Sensor a expirar
+                message: O sensor expira amanhã às 08:00.
+                iris_suggested_action: null
+                triggered_at: '2026-10-14T08:00:00Z'
+                ack_status: acknowledged
+                acknowledged_at: '2026-10-16T09:31:00Z'
+                acknowledged_by_user_id: 20000000-0000-4000-8000-000000000001
+                resolution_notes: null
+                source_reading_id: null
+                source_prediction_id: null
+                created_at: '2026-10-14T08:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: The alert does not exist or belongs to another patient, or the user has no patient profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                not_found:
+                  summary: Unknown alert
+                  value:
+                    code: not_found
+                    message: Alert not found.
+                    details: []
+                patient_profile_not_found:
+                  summary: Onboarding not completed
+                  value:
+                    code: patient_profile_not_found
+                    message: Complete onboarding with POST /v1/me/patient first.
+                    details: []
+
+  /v1/me/devices:
+    get:
+      tags: [Devices]
+      operationId: listDevices
+      summary: List the patient's devices
+      responses:
+        '200':
+          description: The patient's devices.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceList'
+              example:
+                items:
+                  - id: 50000000-0000-4000-8000-000000000001
+                    device_type: cgm_sensor
+                    brand_model: Voltik CGM simulator
+                    serial_or_mac: SIM-0001
+                    connection_status: active
+                    battery_percent: null
+                    first_reading_at: '2026-10-01T08:20:00Z'
+                    sensor_expires_at: '2026-10-15T08:20:00Z'
+                    last_synced_at: '2026-10-16T09:25:05Z'
+                    created_at: '2026-10-01T08:18:00Z'
+                    updated_at: '2026-10-16T09:25:05Z'
+                  - id: 50000000-0000-4000-8000-000000000002
+                    device_type: smartwatch
+                    brand_model: Samsung Galaxy Watch6
+                    serial_or_mac: 'D4:3A:2C:91:7F:10'
+                    connection_status: active
+                    battery_percent: 64
+                    first_reading_at: '2026-10-02T07:05:00Z'
+                    sensor_expires_at: null
+                    last_synced_at: '2026-10-16T09:30:12Z'
+                    created_at: '2026-10-02T07:01:00Z'
+                    updated_at: '2026-10-16T09:30:12Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+    post:
+      tags: [Devices]
+      operationId: registerDevice
+      summary: Register a device
+      description: |
+        Registers a sensor, meter, watch or band. Use the returned `id` as
+        `device_id` when uploading its data. Registering the same `serial_or_mac`
+        again returns the existing device (200).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceCreate'
+            example:
+              device_type: smartwatch
+              brand_model: Samsung Galaxy Watch6
+              serial_or_mac: 'D4:3A:2C:91:7F:10'
+              battery_percent: 64
+      responses:
+        '200':
+          description: A device with this `serial_or_mac` was already registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+              example:
+                id: 50000000-0000-4000-8000-000000000002
+                device_type: smartwatch
+                brand_model: Samsung Galaxy Watch6
+                serial_or_mac: 'D4:3A:2C:91:7F:10'
+                connection_status: active
+                battery_percent: 64
+                first_reading_at: '2026-10-02T07:05:00Z'
+                sensor_expires_at: null
+                last_synced_at: '2026-10-16T09:30:12Z'
+                created_at: '2026-10-02T07:01:00Z'
+                updated_at: '2026-10-16T09:30:12Z'
+        '201':
+          description: Device registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+              example:
+                id: 50000000-0000-4000-8000-000000000002
+                device_type: smartwatch
+                brand_model: Samsung Galaxy Watch6
+                serial_or_mac: 'D4:3A:2C:91:7F:10'
+                connection_status: active
+                battery_percent: 64
+                first_reading_at: null
+                sensor_expires_at: null
+                last_synced_at: null
+                created_at: '2026-10-02T07:01:00Z'
+                updated_at: '2026-10-02T07:01:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Voltik session token returned by the `POST /v1/auth/...` sign-in endpoints, valid for 7 days.
+
+  parameters:
+    RangeFrom:
+      name: from
+      in: query
+      required: true
+      description: Start of the range, inclusive (RFC 3339).
+      schema:
+        type: string
+        format: date-time
+      example: '2026-10-16T00:00:00Z'
+    RangeTo:
+      name: to
+      in: query
+      required: true
+      description: End of the range, exclusive (RFC 3339). Must be after `from`.
+      schema:
+        type: string
+        format: date-time
+      example: '2026-10-17T00:00:00Z'
+    TimeSeriesLimit:
+      name: limit
+      in: query
+      description: Maximum number of items in the page.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 5000
+        default: 1000
+    ListLimit:
+      name: limit
+      in: query
+      description: Maximum number of items in the page.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    Cursor:
+      name: cursor
+      in: query
+      description: The `next_cursor` of the previous page. Leave it out to get the first page.
+      schema:
+        type: string
+    ConsentTypePath:
+      name: consent_type
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/ConsentType'
+    PushTokenId:
+      name: push_token_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AlertId:
+      name: alert_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: The request is malformed or breaks a rule. See `code` and `details`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: invalid_request
+            message: The request is not valid.
+            details: []
+    Unauthenticated:
+      description: The session token is missing, invalid or expired. Sign in again.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: unauthenticated
+            message: The session token has expired.
+            details: []
+    NotFound:
+      description: The resource does not exist or belongs to someone else.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: not_found
+            message: Not found.
+            details: []
+    NoPatientProfile:
+      description: The user has not completed patient onboarding (`POST /v1/me/patient`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: patient_profile_not_found
+            message: Complete onboarding with POST /v1/me/patient first.
+            details: []
+    SignedIn:
+      description: Signed in. Send `access_token` on every request.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Session'
+          example:
+            access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.mock-payload.mock-signature
+            token_type: Bearer
+            expires_at: '2026-10-23T09:30:00Z'
+            user:
+              id: 20000000-0000-4000-8000-000000000001
+              email: manuel.sousa@example.com
+              full_name: Manuel Sousa
+              phone: '+351912345678'
+              profile_photo_url: https://lh3.googleusercontent.com/a/mock-photo
+              account_status: active
+              profile_types: [patient]
+              created_at: '2026-10-01T08:12:00Z'
+    InvalidProviderToken:
+      description: The identity provider rejected the token (bad signature, expired or issued for another app).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: invalid_provider_token
+            message: The token from the identity provider has expired.
+            details: []
+    AccountDisabled:
+      description: The account is suspended or deactivated.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: account_disabled
+            message: This account is suspended.
+            details: []
+    EmailInUse:
+      description: The email already has an account under another provider. Ask the user to sign in the same way as the first time.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: email_in_use
+            message: This email already has an account that signs in with another provider.
+            details: []
+
+  schemas:
+    # --- Shared -------------------------------------------------------------
+    Error:
+      type: object
+      description: Body of every 4xx and 5xx response.
+      required: [code, message, details]
+      properties:
+        code:
+          type: string
+          description: Stable, machine-readable code. See the table in the API description.
+        message:
+          type: string
+          description: Explanation for developers, in English. Do not show it to users.
+        details:
+          type: array
+          description: Fields that failed validation. Empty when not applicable.
+          items:
+            $ref: '#/components/schemas/ErrorDetail'
+    ErrorDetail:
+      type: object
+      required: [field, issue]
+      properties:
+        field:
+          type: string
+          description: Name or path of the field in the request, e.g. `target_min_mg_dl` or `consents`.
+        issue:
+          type: string
+          description: What is wrong with the field, in English.
+    BatchResult:
+      type: object
+      description: Outcome of a batch upload. `inserted + duplicates + rejected` adds up to the batch size.
+      required: [inserted, duplicates, rejected]
+      properties:
+        inserted:
+          type: integer
+          minimum: 0
+          description: Items stored by this request.
+        duplicates:
+          type: integer
+          minimum: 0
+          description: Items whose `idempotency_key` was already stored. Nothing changed for them.
+        rejected:
+          type: array
+          description: Items that will never be accepted. Do not send them again.
+          items:
+            $ref: '#/components/schemas/RejectedItem'
+    RejectedItem:
+      type: object
+      required: [index, idempotency_key, code, message]
+      properties:
+        index:
+          type: integer
+          minimum: 0
+          description: Position of the item in the request, starting at 0.
+        idempotency_key:
+          type: [string, 'null']
+          description: The item's key, if it had one.
+        code:
+          type: string
+          description: '`validation_failed`, `unknown_device` or `measured_at_in_future`.'
+        message:
+          type: string
+          description: Explanation for developers, in English.
+
+    # --- System -------------------------------------------------------------
+    Health:
+      type: object
+      required: [status, environment, version]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        environment:
+          type: string
+          enum: [local, staging, production]
+        version:
+          type: string
+          description: Git commit the API was built from (`dev` for local builds).
+
+    # --- Auth and account ---------------------------------------------------
+    GoogleSignInRequest:
+      type: object
+      required: [id_token]
+      properties:
+        id_token:
+          type: string
+          description: |
+            Google ID token (a JWT) obtained by the client. The API checks its
+            signature, expiry and audience (the web and Android OAuth client IDs).
+    MicrosoftSignInRequest:
+      type: object
+      required: [id_token]
+      properties:
+        id_token:
+          type: string
+          description: |
+            Microsoft ID token (a JWT) obtained with MSAL. The API checks its
+            signature, expiry and audience (the Voltik app registration).
+    AppleSignInRequest:
+      type: object
+      required: [id_token]
+      properties:
+        id_token:
+          type: string
+          description: |
+            Apple identity token (a JWT). The API checks its signature, expiry and
+            audience (the Voltik Services ID).
+        full_name:
+          type: string
+          minLength: 1
+          maxLength: 150
+          description: Send it on the first sign-in, the only time Apple shares the name. Ignored afterwards.
+    FacebookSignInRequest:
+      type: object
+      required: [access_token]
+      properties:
+        access_token:
+          type: string
+          description: |
+            User access token from Facebook Login, granted with the `email`
+            permission. The API checks it with the Graph API.
+    Session:
+      type: object
+      required: [access_token, token_type, expires_at, user]
+      properties:
+        access_token:
+          type: string
+          description: 'Voltik session token. Send it as `Authorization: Bearer <access_token>`.'
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_at:
+          type: string
+          format: date-time
+          description: When the token stops working, 7 days after sign-in.
+        user:
+          $ref: '#/components/schemas/Me'
+    Me:
+      type: object
+      required: [id, email, full_name, phone, profile_photo_url, account_status, profile_types, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+          description: Email given by the identity provider. With Apple it may be a relay address.
+        full_name:
+          type: string
+          maxLength: 150
+        phone:
+          type: [string, 'null']
+          maxLength: 30
+        profile_photo_url:
+          type: [string, 'null']
+          format: uri
+          maxLength: 500
+        account_status:
+          $ref: '#/components/schemas/AccountStatus'
+        profile_types:
+          type: array
+          description: |
+            Active profiles of the user, without repeats. Empty until onboarding is
+            done. A user can have more than one, e.g. patient and caregiver.
+          items:
+            $ref: '#/components/schemas/ProfileType'
+        created_at:
+          type: string
+          format: date-time
+    MeUpdate:
+      type: object
+      minProperties: 1
+      description: Only the fields sent are changed.
+      properties:
+        full_name:
+          type: string
+          minLength: 1
+          maxLength: 150
+        phone:
+          type: [string, 'null']
+          maxLength: 30
+          description: International format recommended, e.g. `+351912345678`. `null` removes it.
+    AccountStatus:
+      type: string
+      enum: [active, suspended, pending, deactivated]
+    ProfileType:
+      type: string
+      description: Which area of the apps the user can open.
+      enum: [patient, caregiver, health_professional, company_manager, admin]
+
+    # --- Consents -----------------------------------------------------------
+    ConsentType:
+      type: string
+      description: |
+        `terms_of_service` and `health_data_processing` are mandatory for patients.
+        `external_ai_processing` is needed to use Iris.
+      enum: [terms_of_service, health_data_processing, external_ai_processing, beta_testing]
+    ConsentAcceptance:
+      type: object
+      required: [consent_type, document_version]
+      properties:
+        consent_type:
+          $ref: '#/components/schemas/ConsentType'
+        document_version:
+          type: string
+          minLength: 1
+          maxLength: 20
+          description: Version of the document the user read, e.g. `1.0`.
+    Consent:
+      type: object
+      required: [consent_type, document_version, created_at, revoked_at]
+      properties:
+        consent_type:
+          $ref: '#/components/schemas/ConsentType'
+        document_version:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+          description: When the user accepted.
+        revoked_at:
+          type: [string, 'null']
+          format: date-time
+          description: When the user revoked it. `null` while it is active.
+    ConsentList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Consent'
+
+    # --- Push tokens --------------------------------------------------------
+    PushPlatform:
+      type: string
+      enum: [android, ios, web]
+    PushTokenRegistration:
+      type: object
+      required: [platform, push_token]
+      properties:
+        platform:
+          $ref: '#/components/schemas/PushPlatform'
+        push_token:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Token given by FCM (Android and web) or APNs (iOS).
+    PushToken:
+      type: object
+      required: [id, platform, is_active, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Use it to unregister the token on sign-out.
+        platform:
+          $ref: '#/components/schemas/PushPlatform'
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # --- Patient ------------------------------------------------------------
+    Gender:
+      type: string
+      enum: [male, female, other, undisclosed]
+    DiabetesType:
+      type: string
+      enum: [type_1, type_2, gestational, lada, mody]
+    Therapy:
+      type: string
+      enum: [multiple_daily_injections, insulin_pump, oral_medication, diet_only]
+    PatientCreate:
+      type: object
+      required: [birth_date, diabetes_type, consents]
+      properties:
+        birth_date:
+          type: string
+          format: date
+        gender:
+          $ref: '#/components/schemas/Gender'
+        occupation:
+          type: string
+          maxLength: 100
+        diabetes_type:
+          $ref: '#/components/schemas/DiabetesType'
+        current_therapy:
+          $ref: '#/components/schemas/Therapy'
+        target_min_mg_dl:
+          type: integer
+          minimum: 40
+          maximum: 550
+          default: 70
+        target_max_mg_dl:
+          type: integer
+          minimum: 20
+          maximum: 550
+          default: 180
+        critical_low_mg_dl:
+          type: integer
+          minimum: 20
+          maximum: 550
+          default: 55
+        critical_high_mg_dl:
+          type: integer
+          minimum: 20
+          maximum: 550
+          default: 250
+        weight_kg:
+          type: number
+          format: double
+          exclusiveMinimum: 0
+          maximum: 999.99
+        height_cm:
+          type: integer
+          minimum: 1
+          maximum: 300
+        consents:
+          type: array
+          minItems: 2
+          description: Must include `terms_of_service` and `health_data_processing`.
+          items:
+            $ref: '#/components/schemas/ConsentAcceptance'
+    PatientUpdate:
+      type: object
+      minProperties: 1
+      description: Only the fields sent are changed. `null` clears an optional field.
+      properties:
+        birth_date:
+          type: string
+          format: date
+        gender:
+          anyOf:
+            - $ref: '#/components/schemas/Gender'
+            - type: 'null'
+        occupation:
+          type: [string, 'null']
+          maxLength: 100
+        diabetes_type:
+          $ref: '#/components/schemas/DiabetesType'
+        current_therapy:
+          anyOf:
+            - $ref: '#/components/schemas/Therapy'
+            - type: 'null'
+        target_min_mg_dl:
+          type: integer
+          minimum: 40
+          maximum: 550
+        target_max_mg_dl:
+          type: integer
+          minimum: 20
+          maximum: 550
+        critical_low_mg_dl:
+          type: integer
+          minimum: 20
+          maximum: 550
+        critical_high_mg_dl:
+          type: integer
+          minimum: 20
+          maximum: 550
+        weight_kg:
+          type: [number, 'null']
+          format: double
+          exclusiveMinimum: 0
+          maximum: 999.99
+        height_cm:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 300
+    Patient:
+      type: object
+      required:
+        - id
+        - birth_date
+        - gender
+        - occupation
+        - diabetes_type
+        - current_therapy
+        - target_min_mg_dl
+        - target_max_mg_dl
+        - critical_low_mg_dl
+        - critical_high_mg_dl
+        - weight_kg
+        - height_cm
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        birth_date:
+          type: string
+          format: date
+        gender:
+          anyOf:
+            - $ref: '#/components/schemas/Gender'
+            - type: 'null'
+        occupation:
+          type: [string, 'null']
+        diabetes_type:
+          $ref: '#/components/schemas/DiabetesType'
+        current_therapy:
+          anyOf:
+            - $ref: '#/components/schemas/Therapy'
+            - type: 'null'
+        target_min_mg_dl:
+          type: integer
+          description: Lower end of the target range (time in range).
+        target_max_mg_dl:
+          type: integer
+          description: Upper end of the target range.
+        critical_low_mg_dl:
+          type: integer
+          description: At or below this value the API raises a `critical_low` alert.
+        critical_high_mg_dl:
+          type: integer
+          description: At or above this value the API raises a `critical_high` alert.
+        weight_kg:
+          type: [number, 'null']
+          format: double
+        height_cm:
+          type: [integer, 'null']
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # --- Glucose ------------------------------------------------------------
+    GlucoseTrend:
+      type: string
+      description: |
+        Direction and speed of change reported by the source. `unknown` when the
+        source gives no trend, e.g. a finger-prick meter.
+      enum: [rising_fast, rising, stable, falling, falling_fast, unknown]
+    GlucoseSource:
+      type: string
+      description: |
+        Where the reading came from. CGM simulator and Dexcom: `cgm_sensor`.
+        Bluetooth meter: `manual_fingerstick`. Health Connect: `health_connect_sync`.
+        HealthKit: `healthkit_sync`.
+      enum: [cgm_sensor, manual_fingerstick, healthkit_sync, health_connect_sync]
+    GlucoseReadingInput:
+      type: object
+      required: [idempotency_key, measured_at, value_mg_dl, source]
+      properties:
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: |
+            Unique key created on the phone for this reading: a UUID, or a
+            device-unique id such as `<meter serial>-<sequence number>`. Keys are
+            unique across all patients.
+        measured_at:
+          type: string
+          format: date-time
+          description: When the sensor or meter took the reading.
+        value_mg_dl:
+          type: integer
+          minimum: 20
+          maximum: 550
+        trend:
+          $ref: '#/components/schemas/GlucoseTrend'
+          description: Leave it out when unknown; the API stores `unknown`.
+        source:
+          $ref: '#/components/schemas/GlucoseSource'
+        device_id:
+          type: string
+          format: uuid
+          description: The device that took the reading, from `POST /v1/me/devices`.
+        signal_quality:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Signal quality reported by the sensor, if any.
+    GlucoseReadingBatch:
+      type: object
+      required: [readings]
+      properties:
+        readings:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/GlucoseReadingInput'
+    GlucoseReading:
+      type: object
+      required: [id, measured_at, value_mg_dl, trend, source, device_id, signal_quality, idempotency_key, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        measured_at:
+          type: string
+          format: date-time
+        value_mg_dl:
+          type: integer
+        trend:
+          $ref: '#/components/schemas/GlucoseTrend'
+        source:
+          $ref: '#/components/schemas/GlucoseSource'
+        device_id:
+          type: [string, 'null']
+          format: uuid
+        signal_quality:
+          type: [integer, 'null']
+        idempotency_key:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+          description: When the reading reached the server. Later than `measured_at` for readings sent from the offline queue.
+    GlucoseReadingPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/GlucoseReading'
+        next_cursor:
+          type: [string, 'null']
+          description: Cursor for the next page. `null` on the last page.
+
+    # --- Heart rate ---------------------------------------------------------
+    HeartRateSampleInput:
+      type: object
+      required: [idempotency_key, measured_at, bpm]
+      properties:
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Unique key created on the phone, e.g. the Health Connect record id plus the sample time.
+        measured_at:
+          type: string
+          format: date-time
+        bpm:
+          type: integer
+          minimum: 25
+          maximum: 250
+        device_id:
+          type: string
+          format: uuid
+          description: The watch or band, from `POST /v1/me/devices`.
+    HeartRateSampleBatch:
+      type: object
+      required: [samples]
+      properties:
+        samples:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/HeartRateSampleInput'
+    HeartRateSample:
+      type: object
+      required: [id, measured_at, bpm, device_id, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        measured_at:
+          type: string
+          format: date-time
+        bpm:
+          type: integer
+        device_id:
+          type: [string, 'null']
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+    HeartRateSamplePage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/HeartRateSample'
+        next_cursor:
+          type: [string, 'null']
+          description: Cursor for the next page. `null` on the last page.
+
+    # --- Alerts -------------------------------------------------------------
+    AlertType:
+      type: string
+      enum: [predicted_low, predicted_high, critical_low, critical_high, sensor_disconnected, sensor_expiring]
+    AlertSeverity:
+      type: string
+      enum: [info, warning, critical]
+    AlertAckStatus:
+      type: string
+      enum: [pending, acknowledged, resolved, dismissed]
+    Alert:
+      type: object
+      required:
+        - id
+        - alert_type
+        - severity
+        - title
+        - message
+        - iris_suggested_action
+        - triggered_at
+        - ack_status
+        - acknowledged_at
+        - acknowledged_by_user_id
+        - resolution_notes
+        - source_reading_id
+        - source_prediction_id
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        alert_type:
+          $ref: '#/components/schemas/AlertType'
+        severity:
+          $ref: '#/components/schemas/AlertSeverity'
+        title:
+          type: string
+          maxLength: 150
+          description: Short text for the notification and the banner, in Portuguese.
+        message:
+          type: string
+          description: Full text shown to the user, in Portuguese.
+        iris_suggested_action:
+          type: [string, 'null']
+          description: What to do now, in Portuguese. Never an insulin dose.
+        triggered_at:
+          type: string
+          format: date-time
+          description: When the condition was detected.
+        ack_status:
+          $ref: '#/components/schemas/AlertAckStatus'
+        acknowledged_at:
+          type: [string, 'null']
+          format: date-time
+        acknowledged_by_user_id:
+          type: [string, 'null']
+          format: uuid
+          description: The patient or a caregiver.
+        resolution_notes:
+          type: [string, 'null']
+          maxLength: 255
+        source_reading_id:
+          type: [integer, 'null']
+          format: int64
+          description: The reading that raised the alert, for `critical_low` and `critical_high`.
+        source_prediction_id:
+          type: [integer, 'null']
+          format: int64
+          description: The prediction that raised the alert, for `predicted_low` and `predicted_high`.
+        created_at:
+          type: string
+          format: date-time
+    AlertPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Alert'
+        next_cursor:
+          type: [string, 'null']
+          description: Cursor for the next page. `null` on the last page.
+
+    # --- Devices ------------------------------------------------------------
+    DeviceType:
+      type: string
+      enum: [cgm_sensor, smartwatch, smartband, glucometer]
+    DeviceConnectionStatus:
+      type: string
+      enum: [active, disconnected, warming_up, expired, replaced]
+    DeviceCreate:
+      type: object
+      required: [device_type, brand_model]
+      properties:
+        device_type:
+          $ref: '#/components/schemas/DeviceType'
+        brand_model:
+          type: string
+          minLength: 1
+          maxLength: 100
+        serial_or_mac:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Serial number or Bluetooth address. Registering the same value again returns the existing device.
+        battery_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        sensor_expires_at:
+          type: string
+          format: date-time
+          description: End of life of a CGM sensor.
+    Device:
+      type: object
+      required:
+        - id
+        - device_type
+        - brand_model
+        - serial_or_mac
+        - connection_status
+        - battery_percent
+        - first_reading_at
+        - sensor_expires_at
+        - last_synced_at
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        device_type:
+          $ref: '#/components/schemas/DeviceType'
+        brand_model:
+          type: string
+        serial_or_mac:
+          type: [string, 'null']
+        connection_status:
+          $ref: '#/components/schemas/DeviceConnectionStatus'
+        battery_percent:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 100
+        first_reading_at:
+          type: [string, 'null']
+          format: date-time
+        sensor_expires_at:
+          type: [string, 'null']
+          format: date-time
+        last_synced_at:
+          type: [string, 'null']
+          format: date-time
+          description: Last time data from this device reached the server.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    DeviceList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Device'

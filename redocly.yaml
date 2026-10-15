@@ -1,0 +1,8 @@
+# Lint rules for the API contract. Run from the repository root:
+#   npx @redocly/cli lint api/openapi.yaml
+extends:
+  - recommended
+
+rules:
+  info-license: off # course project: no licence chosen yet
+  no-server-example.com: off # the localhost servers (mock and local API) are intentional
