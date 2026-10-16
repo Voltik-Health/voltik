@@ -66,7 +66,10 @@ info:
     | 503 | `service_unavailable` | The database or another dependency is down |
 
 servers:
-  # The public staging/production URL is added by DVT-77 once the domain exists.
+  - url: https://voltik-cgm.duckdns.org
+    description: Production environment (Oracle Cloud)
+  - url: https://voltik-cgm-staging.duckdns.org
+    description: Staging environment (Oracle Cloud)
   - url: http://localhost:4010
     description: Prism mock server (see api/README.md)
   - url: http://localhost:8080
