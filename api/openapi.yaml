@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Voltik API
-  version: 0.1.0
+  version: 0.2.0
   summary: REST contract between the Voltik apps and the Go API.
   description: |
     Contract between the Voltik clients (Android app and web portal) and the Go API.
@@ -21,10 +21,14 @@ info:
       except `GET /v1/health` needs `Authorization: Bearer <token>`. There is no
       refresh token: on a 401, get a new token from the same provider and sign
       in again. Signing out happens on the client: forget the token and
-      unregister the push token.
+      unregister the push token. The API checks the account on every request:
+      the token of a deleted account answers 401 `unauthenticated` and the token
+      of a suspended account answers 403 `account_disabled`.
     - **One email, one account.** Signing in with a provider whose email
       already has an account under another provider answers 409
       `email_in_use`: the user must sign in the same way as the first time.
+      The API only keeps emails that the provider has verified. A provider that
+      shares no verified email creates the account without one (`email: null`).
     - **Field names** follow the database (`value_mg_dl`, `measured_at`,
       `idempotency_key`, ...). Responses always include every field, and a field
       without a value is `null`. In `PATCH` requests, leave a field out to keep
@@ -52,18 +56,21 @@ info:
     | --- | --- | --- |
     | 400 | `invalid_request` | Malformed JSON, wrong types or missing parameters |
     | 400 | `validation_failed` | One or more fields break a rule (see `details`) |
-    | 400 | `email_required` | The identity provider did not share an email address |
     | 401 | `unauthenticated` | Session token missing, invalid or expired |
     | 401 | `invalid_provider_token` | The identity provider rejected the token |
     | 403 | `account_disabled` | The account is suspended or deactivated |
+    | 403 | `account_pending_deletion` | The account is waiting for deletion and cannot sign in |
     | 404 | `not_found` | The resource does not exist or belongs to someone else |
     | 404 | `patient_profile_not_found` | Patient onboarding not completed |
     | 409 | `email_in_use` | The email already has an account under another provider |
     | 409 | `patient_profile_exists` | Patient onboarding already completed |
     | 409 | `mandatory_consent` | Mandatory consents cannot be revoked |
+    | 409 | `document_outdated` | A newer version of the legal document is in force |
+    | 409 | `professional_has_patients` | A clinician with active follow-ups cannot delete the account |
     | 429 | `rate_limited` | Too many requests; retry after the `Retry-After` header |
     | 500 | `internal_error` | Unexpected server error |
     | 503 | `service_unavailable` | The database or another dependency is down |
+    | 503 | `provider_unavailable` | Sign-in with this identity provider is not available |
 
 servers:
   - url: https://voltik-cgm.duckdns.org
@@ -145,8 +152,13 @@ paths:
           the app shows the onboarding choice.
         - An email belongs to one account. If it already has an account under
           another provider, the API answers 409 `email_in_use`.
-        - If the provider does not share an email address, the API answers 400
-          `email_required`.
+        - If the provider does not share a verified email address, the account
+          is created without one (`email: null`).
+        - A suspended account answers 403 `account_disabled`. An account waiting
+          for deletion (`DELETE /v1/me`) answers 403 `account_pending_deletion`
+          until it is erased, 30 days after the request.
+        - A provider that Voltik has not enabled answers 503
+          `provider_unavailable`.
       security: []
       requestBody:
         required: true
@@ -164,9 +176,11 @@ paths:
         '401':
           $ref: '#/components/responses/InvalidProviderToken'
         '403':
-          $ref: '#/components/responses/AccountDisabled'
+          $ref: '#/components/responses/SignInForbidden'
         '409':
           $ref: '#/components/responses/EmailInUse'
+        '503':
+          $ref: '#/components/responses/ProviderUnavailable'
 
   /v1/auth/microsoft:
     post:
@@ -194,9 +208,11 @@ paths:
         '401':
           $ref: '#/components/responses/InvalidProviderToken'
         '403':
-          $ref: '#/components/responses/AccountDisabled'
+          $ref: '#/components/responses/SignInForbidden'
         '409':
           $ref: '#/components/responses/EmailInUse'
+        '503':
+          $ref: '#/components/responses/ProviderUnavailable'
 
   /v1/auth/apple:
     post:
@@ -212,6 +228,9 @@ paths:
         Apple shares the user's name only on the first sign-in, and not inside
         the token, so send `full_name` that time. The email may be an Apple relay
         address (`...@privaterelay.appleid.com`).
+
+        Not available yet: it answers 503 `provider_unavailable` until Voltik
+        joins the Apple Developer Program.
       security: []
       requestBody:
         required: true
@@ -230,9 +249,11 @@ paths:
         '401':
           $ref: '#/components/responses/InvalidProviderToken'
         '403':
-          $ref: '#/components/responses/AccountDisabled'
+          $ref: '#/components/responses/SignInForbidden'
         '409':
           $ref: '#/components/responses/EmailInUse'
+        '503':
+          $ref: '#/components/responses/ProviderUnavailable'
 
   /v1/auth/facebook:
     post:
@@ -244,7 +265,7 @@ paths:
         because on Android and the web Facebook gives no ID token. The API checks
         the token with the Graph API and asks Facebook for the name and email.
         Same rules as `POST /v1/auth/google`. A Facebook account that does not
-        share its email gets 400 `email_required`.
+        share its email is created without one.
       security: []
       requestBody:
         required: true
@@ -262,9 +283,11 @@ paths:
         '401':
           $ref: '#/components/responses/InvalidProviderToken'
         '403':
-          $ref: '#/components/responses/AccountDisabled'
+          $ref: '#/components/responses/SignInForbidden'
         '409':
           $ref: '#/components/responses/EmailInUse'
+        '503':
+          $ref: '#/components/responses/ProviderUnavailable'
 
   /v1/me:
     get:
@@ -329,15 +352,31 @@ paths:
       operationId: deleteMe
       summary: Delete the account
       description: |
-        Takes effect immediately: the session token stops working, the sign-in
-        providers are unlinked (the person can sign up again later) and push
-        tokens are removed. Health data is erased after the 30-day retention period and
-        the user record is anonymised (DVT-78).
+        Starts the GDPR erasure. Takes effect immediately: the account and the
+        patient profile are deactivated, the session token stops working, push
+        notifications stop and the subscriptions the user pays stop renewing.
+        Signing in during the next 30 days answers 403 `account_pending_deletion`.
+        After 30 days a daily job erases the account and everything that belongs
+        to it, health data included. The audit log keeps its rows without the
+        person.
+
+        A clinician with active follow-ups gets 409 `professional_has_patients`:
+        the Voltik administration ends the follow-ups first.
       responses:
         '204':
-          description: Account deleted.
+          description: Account deactivated. It is erased 30 days from now.
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '409':
+          description: The user is a clinician with active follow-ups.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: professional_has_patients
+                message: End the active follow-ups before deleting this account.
+                details: []
 
   /v1/me/consents:
     get:
@@ -373,8 +412,11 @@ paths:
       operationId: acceptConsent
       summary: Accept a consent
       description: |
-        Records that the user accepted a version of a consent document. Accepting a
-        version that is already active returns it unchanged (200). Patients accept
+        Records that the user accepted a version of a consent document, with the
+        time and the IP address. Only the version in force can be accepted: an
+        older version answers 409 `document_outdated`. Accepting a version that
+        is already active returns it unchanged (200). Accepting a version that
+        was revoked activates it again (201). Patients accept
         `terms_of_service` and `health_data_processing` during onboarding
         (`POST /v1/me/patient`). Iris asks for `external_ai_processing` on first use.
       requestBody:
@@ -413,6 +455,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '409':
+          $ref: '#/components/responses/DocumentOutdated'
 
   /v1/me/consents/{consent_type}:
     delete:
@@ -518,9 +562,9 @@ paths:
       summary: Complete patient onboarding
       description: |
         Creates the patient profile and records the consents in one step.
-        `consents` must include `terms_of_service` and `health_data_processing`.
-        Thresholds that are left out take the defaults: target 70–180 mg/dL,
-        critical 55 and 250 mg/dL.
+        `consents` must include `terms_of_service` and `health_data_processing`,
+        each in the version in force. Thresholds that are left out take the
+        defaults: target 70–180 mg/dL, critical 55 and 250 mg/dL.
       requestBody:
         required: true
         content:
@@ -574,15 +618,24 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthenticated'
         '409':
-          description: The user already has a patient profile.
+          description: The user already has a patient profile, or a consent is not in the version in force.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-              example:
-                code: patient_profile_exists
-                message: This user already has a patient profile.
-                details: []
+              examples:
+                patient_profile_exists:
+                  summary: Onboarding already completed
+                  value:
+                    code: patient_profile_exists
+                    message: This user already has a patient profile.
+                    details: []
+                document_outdated:
+                  summary: A consent is not in the version in force
+                  value:
+                    code: document_outdated
+                    message: Version 1.0 of terms_of_service is no longer in force.
+                    details: []
     get:
       tags: [Patient]
       operationId: getPatientProfile
@@ -1293,15 +1346,44 @@ components:
             code: invalid_provider_token
             message: The token from the identity provider has expired.
             details: []
-    AccountDisabled:
-      description: The account is suspended or deactivated.
+    SignInForbidden:
+      description: The account cannot sign in. It is suspended, or waiting for deletion.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            account_disabled:
+              summary: Suspended account
+              value:
+                code: account_disabled
+                message: This account is suspended.
+                details: []
+            account_pending_deletion:
+              summary: Account waiting for deletion
+              value:
+                code: account_pending_deletion
+                message: This account will be erased on 2026-11-15T09:30:00Z.
+                details: []
+    ProviderUnavailable:
+      description: Sign-in with this identity provider is not available.
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
           example:
-            code: account_disabled
-            message: This account is suspended.
+            code: provider_unavailable
+            message: Sign in with Apple is not available yet.
+            details: []
+    DocumentOutdated:
+      description: A newer version of the legal document is in force. Show it and ask the user to accept it.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: document_outdated
+            message: Version 1.0 of terms_of_service is no longer in force.
             details: []
     EmailInUse:
       description: The email already has an account under another provider. Ask the user to sign in the same way as the first time.
@@ -1459,9 +1541,11 @@ components:
           type: string
           format: uuid
         email:
-          type: string
+          type: [string, 'null']
           format: email
-          description: Email given by the identity provider. With Apple it may be a relay address.
+          description: |
+            Verified email given by the identity provider, or `null` when the
+            provider shared none. With Apple it may be a relay address.
         full_name:
           type: string
           maxLength: 150
@@ -1599,6 +1683,7 @@ components:
         birth_date:
           type: string
           format: date
+          description: Between 1900-01-01 and today.
         gender:
           $ref: '#/components/schemas/Gender'
         occupation:
@@ -1631,12 +1716,12 @@ components:
         weight_kg:
           type: number
           format: double
-          exclusiveMinimum: 0
-          maximum: 999.99
+          minimum: 2
+          maximum: 500
         height_cm:
           type: integer
-          minimum: 1
-          maximum: 300
+          minimum: 30
+          maximum: 260
         consents:
           type: array
           minItems: 2
@@ -1651,6 +1736,7 @@ components:
         birth_date:
           type: string
           format: date
+          description: Between 1900-01-01 and today.
         gender:
           anyOf:
             - $ref: '#/components/schemas/Gender'
@@ -1683,12 +1769,12 @@ components:
         weight_kg:
           type: [number, 'null']
           format: double
-          exclusiveMinimum: 0
-          maximum: 999.99
+          minimum: 2
+          maximum: 500
         height_cm:
           type: [integer, 'null']
-          minimum: 1
-          maximum: 300
+          minimum: 30
+          maximum: 260
     Patient:
       type: object
       required:
@@ -1849,7 +1935,7 @@ components:
     # --- Heart rate ---------------------------------------------------------
     HeartRateSampleInput:
       type: object
-      required: [idempotency_key, measured_at, bpm]
+      required: [idempotency_key, measured_at, bpm, device_id]
       properties:
         idempotency_key:
           type: string
@@ -1890,7 +1976,7 @@ components:
         bpm:
           type: integer
         device_id:
-          type: [string, 'null']
+          type: string
           format: uuid
         created_at:
           type: string
