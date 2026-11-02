@@ -9,6 +9,7 @@ PostgreSQL 17 in Docker. The schema is managed with **migrations** using
 |---|---|
 | `migrations/` | Schema changes, in order. `<version>_<name>.up.sql` applies, `.down.sql` reverts. |
 | `init/` | Runs once, on first start: creates the `voltik` database and the three roles. |
+| `local/` | Local only: creates `voltik_test`, the database of the backend integration tests (`backend/README.md`). |
 | `seeds/` | **Fictitious** data for development and staging. |
 
 ## Roles (database users)
@@ -26,7 +27,7 @@ PostgreSQL 17 in Docker. The schema is managed with **migrations** using
 |---|---|---|
 | Staging | Server, Docker project `voltik-staging` | `5433` |
 | Production | Server, Docker project `voltik-production` | `5434` |
-| Local (optional) | Mac, root `docker-compose.yml` | `5432` |
+| Local (optional) | Mac, root `docker-compose.yml` | `5432` (`VOLTIK_DB_PORT` in `.env`) |
 
 Migrations are applied **by Jenkins** on every deployment (`infra/server/deploy.sh`).
 The commands below are for the optional local database.
