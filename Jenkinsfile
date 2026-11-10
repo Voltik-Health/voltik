@@ -233,14 +233,26 @@ pipeline {
         success {
             echo "✅ SUCCESS: Voltik pipeline completed successfully for [${targetEnv.toUpperCase()}]!"
             script {
-                sh "bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh 'SUCCESS' 'Deployment completed for ${targetEnv}' || true"
+                try {
+                    withCredentials([string(credentialsId: 'slack-token', variable: 'SLACK_AUTH')]) {
+                        sh "bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh SUCCESS 'Deployment completed for ${targetEnv}'"
+                    }
+                } catch (Exception e) {
+                    echo "⚠️ Slack notification skipped or failed: ${e.message}"
+                }
             }
             cleanWs()
         }
         failure {
             echo "❌ FAILURE: Pipeline failed at stage: ${currentStage}!"
             script {
-                sh "bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh 'FAILURE' '${currentStage}' || true"
+                try {
+                    withCredentials([string(credentialsId: 'slack-token', variable: 'SLACK_AUTH')]) {
+                        sh "bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh FAILURE '${currentStage}'"
+                    }
+                } catch (Exception e) {
+                    echo "⚠️ Slack notification skipped or failed: ${e.message}"
+                }
             }
             cleanWs()
         }
