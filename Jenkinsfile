@@ -47,7 +47,7 @@ pipeline {
                     echo "🎯 Target Environment: ${targetEnv.toUpperCase()}"
 
                     dir(env.INFRA_DIR) {
-                        git branch: 'main', url: 'https://github.com/Voltik-Health/voltik-infra.git'
+                        git branch: 'main', credentialsId: 'github-credentials', url: 'https://github.com/Voltik-Health/voltik-infra.git'
                     }
 
                     config = readJSON file: "${env.INFRA_DIR}/Jenkins/deploy_config.json"
