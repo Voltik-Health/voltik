@@ -234,11 +234,20 @@ pipeline {
             echo "✅ SUCCESS: Voltik pipeline completed successfully for [${targetEnv.toUpperCase()}]!"
             script {
                 try {
-                    withCredentials([string(credentialsId: 'slack-token', variable: 'SLACK_AUTH')]) {
-                        sh "bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh SUCCESS 'Deployment completed for ${targetEnv}'"
-                    }
+                    slackSend(
+                        channel: '#deployments',
+                        color: 'good',
+                        message: "✅ *SUCCESS:* Voltik pipeline completed for *[${targetEnv.toUpperCase()}]*!\n• *Branch:* `${env.BRANCH_NAME}`\n• *Live URL:* https://voltik-cgm-staging.duckdns.org/"
+                    )
                 } catch (Exception e) {
-                    echo "⚠️ Slack notification skipped or failed: ${e.message}"
+                    echo "⚠️ slackSend step failed, trying script: ${e.message}"
+                    try {
+                        withCredentials([string(credentialsId: 'slack-token', variable: 'SLACK_AUTH')]) {
+                            sh "bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh SUCCESS 'Deployment completed for ${targetEnv}'"
+                        }
+                    } catch (Exception ex) {
+                        echo "⚠️ Fallback notification error: ${ex.message}"
+                    }
                 }
             }
             cleanWs()
@@ -247,11 +256,20 @@ pipeline {
             echo "❌ FAILURE: Pipeline failed at stage: ${currentStage}!"
             script {
                 try {
-                    withCredentials([string(credentialsId: 'slack-token', variable: 'SLACK_AUTH')]) {
-                        sh "bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh FAILURE '${currentStage}'"
-                    }
+                    slackSend(
+                        channel: '#deployments',
+                        color: 'danger',
+                        message: "❌ *FAILURE:* Pipeline failed at stage: *${currentStage}*!\n• *Branch:* `${env.BRANCH_NAME}`"
+                    )
                 } catch (Exception e) {
-                    echo "⚠️ Slack notification skipped or failed: ${e.message}"
+                    echo "⚠️ slackSend step failed, trying script: ${e.message}"
+                    try {
+                        withCredentials([string(credentialsId: 'slack-token', variable: 'SLACK_AUTH')]) {
+                            sh "bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh FAILURE '${currentStage}'"
+                        }
+                    } catch (Exception ex) {
+                        echo "⚠️ Fallback notification error: ${ex.message}"
+                    }
                 }
             }
             cleanWs()
