@@ -23,7 +23,7 @@ Rui Passos & Afonso Carvalho · CTeSP TPSI · IPMAIA · 2026
 |---|---|---|
 | `apps/android/` | Android client application | Kotlin + Jetpack Compose |
 | `apps/ios/` | iOS client application | Swift + SwiftUI |
-| `apps/web/` | Web portal (patient & clinical dashboard) | Vue 3 + Vite |
+| `apps/web/` | Web portal (patient & clinical dashboard) | React (TypeScript) + Vite |
 | `backend/` | Core REST API (Clean Architecture) | Go |
 | `database/` | Migrations, roles initialization and seed data | PostgreSQL 17 + golang-migrate |
 | `ml/` | Glucose prediction service & Iris assistant | Python + FastAPI / Google Gemini |
