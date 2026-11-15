@@ -233,21 +233,28 @@ pipeline {
         success {
             echo "✅ SUCCESS: Voltik pipeline completed successfully for [${targetEnv.toUpperCase()}]!"
             script {
-                try {
-                    slackSend(
-                        channel: '#deployments',
-                        color: 'good',
-                        message: "✅ *SUCCESS:* Voltik pipeline completed for *[${targetEnv.toUpperCase()}]*!\n• *Branch:* `${env.BRANCH_NAME}`\n• *Live URL:* https://voltik-cgm-staging.duckdns.org/"
-                    )
-                } catch (Exception e) {
-                    echo "⚠️ slackSend step failed, trying script: ${e.message}"
+                def isDeployBranch = (env.BRANCH_NAME == 'staging' || env.BRANCH_NAME == 'main')
+                if (isDeployBranch) {
+                    def liveUrl = (targetEnv == 'production') ? 'https://voltik-cgm.duckdns.org/' : 'https://voltik-cgm-staging.duckdns.org/'
+                    def header = (targetEnv == 'production') ? '🎉 *PRODUCTION DEPLOYED:*' : '🚀 *STAGING DEPLOYED:*'
                     try {
-                        withCredentials([string(credentialsId: 'slack-token', variable: 'SLACK_AUTH')]) {
-                            sh "bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh SUCCESS 'Deployment completed for ${targetEnv}'"
+                        slackSend(
+                            channel: '#deployments',
+                            color: 'good',
+                            message: "${header} Voltik ${targetEnv.capitalize()} updated successfully!\n• *Branch:* `${env.BRANCH_NAME}`\n• *Live URL:* ${liveUrl}"
+                        )
+                    } catch (Exception e) {
+                        echo "⚠️ slackSend step failed, trying script: ${e.message}"
+                        try {
+                            withCredentials([string(credentialsId: 'slack-token', variable: 'SLACK_AUTH')]) {
+                                sh "bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh SUCCESS 'Deployment completed for ${targetEnv}'"
+                            }
+                        } catch (Exception ex) {
+                            echo "⚠️ Fallback notification error: ${ex.message}"
                         }
-                    } catch (Exception ex) {
-                        echo "⚠️ Fallback notification error: ${ex.message}"
                     }
+                } else {
+                    echo "ℹ️ Feature branch [${env.BRANCH_NAME}] passed all checks. Silent success (no Slack notification sent)."
                 }
             }
             cleanWs()
@@ -255,17 +262,20 @@ pipeline {
         failure {
             echo "❌ FAILURE: Pipeline failed at stage: ${currentStage}!"
             script {
+                def isDeployBranch = (env.BRANCH_NAME == 'staging' || env.BRANCH_NAME == 'main')
+                def targetChannel = isDeployBranch ? '#deployments' : '#voltik-dev'
+                def errorHeader = isDeployBranch ? "🚨 *DEPLOYMENT FAILED [${targetEnv.toUpperCase()}]:*" : "❌ *CI TESTS FAILED:*"
                 try {
                     slackSend(
-                        channel: '#deployments',
+                        channel: targetChannel,
                         color: 'danger',
-                        message: "❌ *FAILURE:* Pipeline failed at stage: *${currentStage}*!\n• *Branch:* `${env.BRANCH_NAME}`"
+                        message: "${errorHeader} Pipeline failed at stage: *${currentStage}*!\n• *Branch:* `${env.BRANCH_NAME}`"
                     )
                 } catch (Exception e) {
                     echo "⚠️ slackSend step failed, trying script: ${e.message}"
                     try {
                         withCredentials([string(credentialsId: 'slack-token', variable: 'SLACK_AUTH')]) {
-                            sh "bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh FAILURE '${currentStage}'"
+                            sh "SLACK_CHANNEL='${targetChannel}' bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh FAILURE '${currentStage}'"
                         }
                     } catch (Exception ex) {
                         echo "⚠️ Fallback notification error: ${ex.message}"
