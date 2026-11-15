@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,5 +184,49 @@ func TestAppleVerifier(t *testing.T) {
 	id, err = v.Verify(context.Background(), p.sign(t, with(base, map[string]any{"email_verified": "false"})))
 	if err != nil || id.Email != nil {
 		t.Fatalf("unverified email kept: %+v, %v", id, err)
+	}
+}
+
+// A provider whose keys cannot be fetched is a 503 for the client, not a 401
+// that would make the user sign in again.
+func TestOIDCProviderUnreachable(t *testing.T) {
+	p := newFakeProvider(t)
+	token := p.sign(t, claimsFor(googleIssuer, "web-client"))
+
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close() // nothing listens there any more: connection refused
+	v := NewGoogleVerifier(context.Background(), OIDCConfig{Issuer: googleIssuer, JWKSURL: down.URL, ClientIDs: []string{"web-client"}})
+	_, err := v.Verify(context.Background(), token)
+	if !errors.Is(err, domain.ErrServiceUnavailable) {
+		t.Fatalf("err = %v, want ErrServiceUnavailable", err)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatal("the error leaks the token")
+	}
+}
+
+// A key server that never answers does not hang the sign-in.
+func TestOIDCKeyFetchTimesOut(t *testing.T) {
+	p := newFakeProvider(t)
+	token := p.sign(t, claimsFor(googleIssuer, "web-client"))
+
+	stuck := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done(): // the client gave up
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	t.Cleanup(stuck.Close)
+	v := NewGoogleVerifier(context.Background(), OIDCConfig{
+		Issuer: googleIssuer, JWKSURL: stuck.URL, ClientIDs: []string{"web-client"},
+		HTTPClient: &http.Client{Timeout: 200 * time.Millisecond},
+	})
+	start := time.Now()
+	_, err := v.Verify(context.Background(), token)
+	if !errors.Is(err, domain.ErrServiceUnavailable) {
+		t.Fatalf("err = %v, want ErrServiceUnavailable", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("sign-in hung for %v", elapsed)
 	}
 }

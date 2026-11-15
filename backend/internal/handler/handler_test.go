@@ -130,6 +130,7 @@ func newTestAPI(t *testing.T) *testAPI {
 		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Environment: "local",
 		Version:     "test",
+		CORSOrigins: map[string]bool{"http://localhost:5173": true},
 		Tokens:      tokens,
 		Accounts:    fakeLoader{a.ID: a},
 		Health:      api.health,
@@ -414,5 +415,43 @@ func TestRequestIDFromProxy(t *testing.T) {
 	api.handler.ServeHTTP(rec, req)
 	if rec.Header().Get("X-Request-ID") != "abc-123" {
 		t.Fatalf("X-Request-ID = %q", rec.Header().Get("X-Request-ID"))
+	}
+}
+
+func TestCORS(t *testing.T) {
+	api := newTestAPI(t)
+	send := func(method, origin string, headers map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, "/v1/me", nil)
+		req.Header.Set("Origin", origin)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		api.handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Preflight of a request where the frontend sends its own request id
+	rec := send("OPTIONS", "http://localhost:5173", map[string]string{
+		"Access-Control-Request-Method":  "GET",
+		"Access-Control-Request-Headers": "authorization, x-request-id",
+	})
+	if rec.Code != 204 || rec.Header().Get("Access-Control-Allow-Origin") != "http://localhost:5173" {
+		t.Fatalf("preflight = %d %v", rec.Code, rec.Header())
+	}
+	if h := rec.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(h, "X-Request-ID") {
+		t.Fatalf("Access-Control-Allow-Headers = %q", h)
+	}
+
+	// The frontend can only read the request id of the answer if it is exposed
+	rec = send("GET", "http://localhost:5173", map[string]string{"Authorization": "Bearer " + api.token})
+	if rec.Code != 200 || rec.Header().Get("Access-Control-Expose-Headers") != "X-Request-ID" {
+		t.Fatalf("GET = %d, exposed %q", rec.Code, rec.Header().Get("Access-Control-Expose-Headers"))
+	}
+
+	// An unknown origin gets no CORS headers at all
+	rec = send("GET", "https://evil.example", map[string]string{"Authorization": "Bearer " + api.token})
+	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("unknown origin allowed: %v", rec.Header())
 	}
 }

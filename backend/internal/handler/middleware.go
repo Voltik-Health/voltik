@@ -95,12 +95,14 @@ func (s *Server) withRecovery(next http.Handler) http.Handler {
 }
 
 // withCORS lets the local frontends (e.g. http://localhost:5173) call the staging API.
+// The frontend may send its own X-Request-ID and read the one in the answer.
 func withCORS(origins map[string]bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if o := r.Header.Get("Origin"); origins[o] {
 			w.Header().Set("Access-Control-Allow-Origin", o)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		}
 		if r.Method == http.MethodOptions {

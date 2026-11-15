@@ -1018,10 +1018,10 @@ paths:
                     triggered_at: '2026-10-15T16:42:00Z'
                     ack_status: acknowledged
                     acknowledged_at: '2026-10-15T16:43:10Z'
-                    acknowledged_by_user_id: 20000000-0000-4000-8000-000000000001
                     resolution_notes: null
                     source_reading_id: 183950
                     source_prediction_id: null
+                    device_id: null
                     created_at: '2026-10-15T16:42:01Z'
                   - id: 80000000-0000-4000-8000-000000000001
                     alert_type: sensor_expiring
@@ -1032,10 +1032,10 @@ paths:
                     triggered_at: '2026-10-14T08:00:00Z'
                     ack_status: pending
                     acknowledged_at: null
-                    acknowledged_by_user_id: null
                     resolution_notes: null
                     source_reading_id: null
                     source_prediction_id: null
+                    device_id: 50000000-0000-4000-8000-000000000001
                     created_at: '2026-10-14T08:00:00Z'
                 next_cursor: null
         '400':
@@ -1072,10 +1072,10 @@ paths:
                 triggered_at: '2026-10-14T08:00:00Z'
                 ack_status: acknowledged
                 acknowledged_at: '2026-10-16T09:31:00Z'
-                acknowledged_by_user_id: 20000000-0000-4000-8000-000000000001
                 resolution_notes: null
                 source_reading_id: null
                 source_prediction_id: null
+                device_id: 50000000-0000-4000-8000-000000000001
                 created_at: '2026-10-14T08:00:00Z'
         '400':
           $ref: '#/components/responses/BadRequest'
@@ -2015,10 +2015,10 @@ components:
         - triggered_at
         - ack_status
         - acknowledged_at
-        - acknowledged_by_user_id
         - resolution_notes
         - source_reading_id
         - source_prediction_id
+        - device_id
         - created_at
       properties:
         id:
@@ -2047,10 +2047,7 @@ components:
         acknowledged_at:
           type: [string, 'null']
           format: date-time
-        acknowledged_by_user_id:
-          type: [string, 'null']
-          format: uuid
-          description: The patient or a caregiver.
+          description: When the patient or a caregiver acknowledged it. Who did is kept per recipient (`alert_recipients`).
         resolution_notes:
           type: [string, 'null']
           maxLength: 255
@@ -2062,6 +2059,10 @@ components:
           type: [integer, 'null']
           format: int64
           description: The prediction that raised the alert, for `predicted_low` and `predicted_high`.
+        device_id:
+          type: [string, 'null']
+          format: uuid
+          description: The sensor that raised the alert, for `sensor_disconnected` and `sensor_expiring`.
         created_at:
           type: string
           format: date-time

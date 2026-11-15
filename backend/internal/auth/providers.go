@@ -3,9 +3,13 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 
@@ -19,10 +23,15 @@ import (
 // OIDCConfig is where an OpenID Connect provider publishes its keys and who
 // its tokens must be issued to.
 type OIDCConfig struct {
-	Issuer    string   // for Microsoft, with {tenantid} in place of the tenant
-	JWKSURL   string   // the provider's public signing keys
-	ClientIDs []string // accepted audiences: the Voltik apps registered with the provider
+	Issuer     string       // for Microsoft, with {tenantid} in place of the tenant
+	JWKSURL    string       // the provider's public signing keys
+	ClientIDs  []string     // accepted audiences: the Voltik apps registered with the provider
+	HTTPClient *http.Client // fetches the keys; nil means a client with a 10-second timeout
 }
+
+// jwksTimeout bounds each fetch of a provider's keys, so a provider that
+// hangs cannot hang the sign-in with it. The keys are cached after a fetch.
+const jwksTimeout = 10 * time.Second
 
 func GoogleConfig(clientIDs []string) OIDCConfig {
 	return OIDCConfig{
@@ -63,15 +72,21 @@ type oidcVerifier struct {
 	provider  string
 	issuer    string
 	clientIDs []string
+	keys      oidc.KeySet
 	verifier  *oidc.IDTokenVerifier
 }
 
 func newOIDCVerifier(ctx context.Context, provider string, cfg OIDCConfig) *oidcVerifier {
-	keys := oidc.NewRemoteKeySet(ctx, cfg.JWKSURL)
+	client := cfg.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: jwksTimeout}
+	}
+	keys := oidc.NewRemoteKeySet(oidc.ClientContext(ctx, client), cfg.JWKSURL)
 	return &oidcVerifier{
 		provider:  provider,
 		issuer:    cfg.Issuer,
 		clientIDs: cfg.ClientIDs,
+		keys:      keys,
 		verifier: oidc.NewVerifier(cfg.Issuer, keys, &oidc.Config{
 			SkipClientIDCheck: true, // several client IDs: checked in verify
 			SkipIssuerCheck:   strings.Contains(cfg.Issuer, "{tenantid}"),
@@ -91,6 +106,15 @@ type claims struct {
 
 func (v *oidcVerifier) verify(ctx context.Context, raw string) (domain.Identity, claims, error) {
 	var c claims
+	// The signature is checked on its own first: Verify below hides why it
+	// failed, and a provider whose keys cannot be fetched is a 503, not a 401
+	// that would make the user sign in again.
+	if _, err := v.keys.VerifySignature(ctx, raw); err != nil {
+		if unreachable(err) {
+			return domain.Identity{}, c, fmt.Errorf("%w: %s keys: %v", domain.ErrServiceUnavailable, v.provider, err)
+		}
+		return domain.Identity{}, c, invalidToken(err)
+	}
 	tok, err := v.verifier.Verify(ctx, raw)
 	if err != nil {
 		return domain.Identity{}, c, invalidToken(err)
@@ -172,6 +196,14 @@ func (a *AppleVerifier) Verify(ctx context.Context, raw string) (domain.Identity
 
 func invalidToken(err error) error {
 	return fmt.Errorf("%w: %v", domain.ErrInvalidProviderToken, err)
+}
+
+// unreachable reports whether err means the provider's key server could not
+// be reached in time. go-oidc keeps the network error in the chain of the
+// key set's errors (not in Verify's), which is why verify checks the keys first.
+func unreachable(err error) bool {
+	var urlErr *url.Error
+	return errors.As(err, &urlErr) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // flexBool reads a boolean claim sent as true or as "true" (Apple sends strings).
