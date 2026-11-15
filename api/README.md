@@ -75,4 +75,5 @@ The linter also checks every example against its schema. The CI pipeline (DVT-77
 - Renaming or removing a field, or changing its type, breaks the apps. Agree on it first.
 - Field names follow the database (`database/migrations/`).
 - Keep the examples up to date, because the mock returns them.
+- Once merged, regenerate the backend code: `cd backend && go generate ./...` (see `backend/README.md`).
 - Groups 2 (diary, history, care team) and 3 (Iris, telemedicine, Dexcom) of DVT-76 come in later pull requests, before the tickets that use them start.

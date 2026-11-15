@@ -1,11 +1,11 @@
-// Entry point of the Voltik API.
-// For now it only exposes /v1/health, to validate the whole chain:
-// GitHub -> Jenkins -> Docker image -> staging/production -> HTTPS proxy.
+// Entry point of the Voltik API: reads the configuration, opens the database
+// pool, wires the layers (handler → service → repository) and serves HTTP.
+// It also runs the daily retention job (internal/retention).
 package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,63 +13,104 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/voltik/voltik/backend/internal/auth"
 	"github.com/voltik/voltik/backend/internal/config"
+	"github.com/voltik/voltik/backend/internal/database"
+	"github.com/voltik/voltik/backend/internal/domain"
+	"github.com/voltik/voltik/backend/internal/handler"
+	"github.com/voltik/voltik/backend/internal/repository"
+	"github.com/voltik/voltik/backend/internal/retention"
+	"github.com/voltik/voltik/backend/internal/service"
 )
 
 // version is set at build time: -ldflags "-X main.version=<commit>"
 var version = "dev"
 
 func main() {
-	cfg := config.Load()
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("environment", cfg.Environment, "version", version)
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	cfg, err := config.Load()
+	if err != nil {
+		log.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
+	log = log.With("environment", cfg.Environment, "version", version)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"status":      "ok",
-			"environment": cfg.Environment,
-			"version":     version,
-		})
+	// Cancelled when Docker sends SIGTERM (e.g. during a new deployment)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := database.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Error("database configuration", "error", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		log.Warn("database not reachable yet", "error", err)
+	}
+	store := repository.New(pool)
+
+	tokens := auth.NewTokens(cfg.JWTSecret, cfg.Environment)
+	verifiers := providers(ctx, cfg)
+	for provider := range verifiers {
+		log.Info("sign-in provider configured", "provider", provider)
+	}
+
+	router := handler.NewRouter(handler.Deps{
+		Log:         log,
+		Environment: cfg.Environment,
+		Version:     version,
+		CORSOrigins: cfg.CORSOrigins,
+		Tokens:      tokens,
+		Accounts:    store,
+		Health:      store,
+		SignIn:      service.NewSignIn(store, tokens, verifiers),
+		Account:     service.NewAccounts(store),
+		Patients:    service.NewPatients(store),
+		Consents:    service.NewConsents(store),
 	})
+
+	go retention.NewJob(store, log).Schedule(ctx)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           withCORS(cfg.CORSOrigins, mux),
+		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
-
 	go func() {
 		log.Info("API starting", "port", cfg.Port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("server error", "error", err)
 			os.Exit(1)
 		}
 	}()
 
-	// Graceful shutdown when Docker sends SIGTERM (e.g. during a new deployment)
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(ctx)
+	_ = srv.Shutdown(shutdownCtx)
 	log.Info("API stopped")
 }
 
-// withCORS lets the local frontends (e.g. http://localhost:5173) call the staging API.
-func withCORS(origins map[string]bool, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if o := r.Header.Get("Origin"); origins[o] {
-			w.Header().Set("Access-Control-Allow-Origin", o)
-			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		}
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// providers returns the sign-in verifiers configured on this server. The
+// others answer 503 provider_unavailable, and so does any provider marked
+// inactive in identity_providers (Apple, for now).
+func providers(ctx context.Context, cfg config.Config) map[string]service.Verifier {
+	v := map[string]service.Verifier{}
+	if len(cfg.GoogleClientIDs) > 0 {
+		v[domain.ProviderGoogle] = auth.NewGoogleVerifier(ctx, auth.GoogleConfig(cfg.GoogleClientIDs))
+	}
+	if cfg.MicrosoftClientID != "" {
+		v[domain.ProviderMicrosoft] = auth.NewMicrosoftVerifier(ctx, auth.MicrosoftConfig(cfg.MicrosoftClientID))
+	}
+	if len(cfg.AppleClientIDs) > 0 {
+		v[domain.ProviderApple] = auth.NewAppleVerifier(ctx, auth.AppleConfig(cfg.AppleClientIDs))
+	}
+	if cfg.FacebookAppID != "" {
+		v[domain.ProviderFacebook] = auth.NewFacebookVerifier(cfg.FacebookAppID, cfg.FacebookAppSecret, auth.FacebookGraphURL)
+	}
+	return v
 }

@@ -1,0 +1,41 @@
+# Local development only. Staging and production run from voltik-infra.
+# Passwords come from .env (copy .env.example). Commands: database/README.md.
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set it in .env}
+      VOLTIK_MIGRATIONS_PASSWORD: ${VOLTIK_MIGRATIONS_PASSWORD:?set it in .env}
+      VOLTIK_API_PASSWORD: ${VOLTIK_API_PASSWORD:?set it in .env}
+      VOLTIK_READONLY_PASSWORD: ${VOLTIK_READONLY_PASSWORD:?set it in .env}
+      TZ: UTC
+    ports:
+      - "127.0.0.1:${VOLTIK_DB_PORT:-5432}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      # Run once, while the volume is empty: the voltik database and its roles,
+      # then voltik_test for the backend integration tests
+      - ./database/init/01-roles.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro
+      - ./database/local/02-test-database.sh:/docker-entrypoint-initdb.d/02-test-database.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d voltik"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # docker compose --profile tools run --rm migrate up
+  migrate:
+    image: migrate/migrate:v4.19.1
+    profiles: [tools]
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./database/migrations:/migrations:ro
+    entrypoint:
+      - migrate
+      - -path=/migrations
+      - -database=postgres://voltik_migrations:${VOLTIK_MIGRATIONS_PASSWORD}@db:5432/voltik?sslmode=disable
+
+volumes:
+  db-data:
