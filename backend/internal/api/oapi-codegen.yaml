@@ -1,0 +1,13 @@
+# Generates api.gen.go from the contract. Run `go generate ./...` in backend/
+# after every change to api/openapi.yaml, and commit the result.
+package: api
+output: api.gen.go
+generate:
+  models: true
+  std-http-server: true
+  strict-server: true
+output-options:
+  # PATCH bodies tell "field left out" from "field sent as null"
+  nullable-type: true
+  # Only the endpoints implemented so far. Add a tag when its ticket starts.
+  include-tags: [System, Auth, Account, Consents, Patient]
