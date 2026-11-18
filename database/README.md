@@ -29,7 +29,7 @@ PostgreSQL 17 in Docker. The schema is managed with **migrations** using
 | Production | Server, Docker project `voltik-production` | `5434` |
 | Local (optional) | Mac, root `docker-compose.yml` | `5432` (`VOLTIK_DB_PORT` in `.env`) |
 
-Migrations are applied **by Jenkins** on every deployment (`infra/server/deploy.sh`).
+Migrations are applied **by Jenkins** on every deployment via `voltik-infra` (`deploy.sh`).
 The commands below are for the optional local database.
 
 ## Commands (local, optional)
@@ -68,11 +68,10 @@ docker compose down -v
    If both developers take the same number, whoever merges second renumbers theirs.
 2. `.up.sql` makes the change; `.down.sql` undoes exactly that change. Wrap each in `BEGIN; ... COMMIT;`.
 3. (Recommended) Test `up`, `down 1` and `up` on the local database, so staging doesn't break for the other developer.
-4. `./scripts/to-staging.sh`: Jenkins applies it on staging.
-5. Pull request to `main`: once approved and confirmed, Jenkins applies it in production.
+4. Push to branch and deploy via Jenkins pipeline.
+5. Pull request to `main`: once approved and merged, Jenkins applies it in production.
 
 **Never edit a migration that has already run on staging or production.** Always fix it with a new migration.
-If staging is left with migrations from abandoned branches: run `infra/server/reset-staging.sh` on the server.
 
 ## Connecting with DBeaver
 

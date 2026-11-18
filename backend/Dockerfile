@@ -17,6 +17,9 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}"
 # --- Stage 2: Minimal runtime, non-root ---------------------------------------
 FROM alpine:3.22
 
+# Install root CA certificates and timezone data for external HTTPS / OIDC calls
+RUN apk --no-cache add ca-certificates tzdata
+
 # Security: run as unprivileged user
 RUN adduser -D -H -u 10001 voltik
 USER voltik

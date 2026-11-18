@@ -8,7 +8,7 @@ Storing passwords means owning hashing, resets, brute-force protection and breac
 
 ## Decision
 Users sign in only through OpenID Connect providers: Google, Microsoft, Apple and Facebook.
-The API validates the provider's ID token and finds the user through `external_identities (provider, provider_subject)`.
+The API validates the provider's ID token and finds the user through `external_identities (provider_id, provider_subject)`.
 The `users` table has no password column.
 
 ## Consequences
