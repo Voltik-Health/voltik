@@ -31,4 +31,6 @@ const (
 	AuditConsentGranted         = "consent_granted"
 	AuditConsentRevoked         = "consent_revoked"
 	AuditAccountDeletionRequest = "account_deletion_requested"
+	AuditReportPDFExport        = "report_pdf_export"
+	AuditFoodDiaryView          = "food_diary_view"
 )

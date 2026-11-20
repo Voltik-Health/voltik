@@ -77,3 +77,29 @@ func (e *ValidationError) OrNil() error {
 func Invalid(field, issue string) error {
 	return &ValidationError{Issues: []FieldIssue{{Field: field, Issue: issue}}}
 }
+
+// Errors of the health data (DVT-79).
+var (
+	ErrForbidden            = errors.New("the user's profile does not allow this action")
+	ErrConsentRequired      = errors.New("the patient has not accepted the consent this feature needs")
+	ErrReadingImmutable     = errors.New("only manual readings can be corrected or deleted")
+	ErrLinkExpired          = errors.New("the signed link is not valid or has expired")
+	ErrActiveSensorExists   = errors.New("the patient already has a CGM sensor in use")
+	ErrBarcodeInUse         = errors.New("another food already has this barcode")
+	ErrCategoryNameTaken    = errors.New("a food category with this name already exists")
+	ErrComponentExists      = errors.New("the ingredient is already part of the dish")
+	ErrNoReadings           = errors.New("the period has no glucose readings")
+	ErrAnalysisNotReady     = errors.New("the analysis of the photo has not finished")
+	ErrPayloadTooLarge      = errors.New("the uploaded file is too large")
+	ErrUnsupportedMediaType = errors.New("the uploaded file type is not accepted")
+)
+
+// StateError is an action the resource's state does not allow (409 invalid_state).
+type StateError struct {
+	Message string
+}
+
+func (e *StateError) Error() string { return e.Message }
+
+// InvalidState returns a StateError.
+func InvalidState(message string) error { return &StateError{Message: message} }

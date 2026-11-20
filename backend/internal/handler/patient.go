@@ -55,6 +55,8 @@ func (s *Server) CreatePatientProfile(ctx context.Context, req api.CreatePatient
 		Thresholds:   domain.DefaultThresholds,
 		WeightKg:     b.WeightKg,
 		HeightCm:     b.HeightCm,
+		// UC147: on unless the patient turns it off
+		WeeklyReportsEnabled: b.WeeklyReportsEnabled == nil || *b.WeeklyReportsEnabled,
 	}
 	setIfSent(&p.TargetMin, b.TargetMinMgDl)
 	setIfSent(&p.TargetMax, b.TargetMaxMgDl)
@@ -76,7 +78,8 @@ func (s *Server) UpdatePatientProfile(ctx context.Context, req api.UpdatePatient
 	b := req.Body
 	if b.BirthDate == nil && !b.Gender.IsSpecified() && !b.Occupation.IsSpecified() && b.DiabetesType == nil &&
 		!b.CurrentTherapy.IsSpecified() && b.TargetMinMgDl == nil && b.TargetMaxMgDl == nil &&
-		b.CriticalLowMgDl == nil && b.CriticalHighMgDl == nil && !b.WeightKg.IsSpecified() && !b.HeightCm.IsSpecified() {
+		b.CriticalLowMgDl == nil && b.CriticalHighMgDl == nil && !b.WeightKg.IsSpecified() && !b.HeightCm.IsSpecified() &&
+		b.WeeklyReportsEnabled == nil {
 		return nil, &badRequest{message: "Send at least one field to change."}
 	}
 
@@ -110,6 +113,9 @@ func (s *Server) UpdatePatientProfile(ctx context.Context, req api.UpdatePatient
 		setIfSent(&p.CriticalHigh, b.CriticalHighMgDl)
 		patchValue(b.WeightKg, &p.WeightKg)
 		patchValue(b.HeightCm, &p.HeightCm)
+		if b.WeeklyReportsEnabled != nil {
+			p.WeeklyReportsEnabled = *b.WeeklyReportsEnabled
+		}
 	})
 	if err != nil {
 		return nil, err

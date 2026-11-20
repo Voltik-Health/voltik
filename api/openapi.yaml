@@ -168,6 +168,8 @@ tags:
     description: Meal photos and report PDFs, through signed links.
   - name: Webhooks
     description: Calls from external providers. Not for the apps.
+  - name: Integrations
+    description: Uploads from other apps (Juggluco, xDrip+) through the Nightscout API. Not for the Voltik apps.
 
 paths:
   /v1/health:
@@ -1739,6 +1741,163 @@ paths:
         '409':
           $ref: '#/components/responses/InvalidState'
 
+  /v1/me/devices/{device_id}/nightscout-secret:
+    post:
+      tags: [Devices]
+      operationId: createNightscoutSecret
+      summary: Let Juggluco or xDrip+ upload this sensor's readings
+      description: |
+        For testing with a real CGM sensor. Apps such as Juggluco and xDrip+
+        read FreeStyle Libre and Dexcom sensors over Bluetooth and can upload
+        each reading to a Nightscout server. Voltik answers the Nightscout
+        upload API: put `nightscout_url` and `api_secret` in the app's
+        Nightscout settings, and every reading reaches Voltik within a minute,
+        with alerts and push.
+
+        The device must be a CGM sensor. The secret is shown only once; asking
+        again creates a new one and the old one stops working. These apps are
+        not certified medical devices: use them for testing only.
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      responses:
+        '201':
+          description: The settings for the uploader app.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NightscoutSecret'
+              example:
+                nightscout_url: https://voltik-cgm-staging.duckdns.org/v1/nightscout
+                api_secret: k7qm3x9vfa2wp8re
+                created_at: '2026-11-20T21:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+
+  /v1/nightscout/api/v1/entries:
+    post:
+      tags: [Integrations]
+      operationId: uploadNightscoutEntries
+      summary: Nightscout upload of sensor readings
+      description: |
+        The part of the Nightscout API that Juggluco and xDrip+ use to upload
+        readings. Not for the Voltik apps. The uploader authenticates with the
+        `api-secret` header: the SHA-1 of the secret from
+        `POST /v1/me/devices/{device_id}/nightscout-secret` (the secret itself
+        is accepted too). `sgv` entries become CGM readings of that sensor,
+        `mbg` entries become manual readings, and other types are ignored.
+        Resending an entry changes nothing.
+      security: []
+      parameters:
+        - name: api-secret
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              maxItems: 1000
+              items:
+                $ref: '#/components/schemas/NightscoutEntry'
+            example:
+              - type: sgv
+                sgv: 112
+                date: 1763672400000
+                dateString: '2026-11-20T21:00:00.000Z'
+                direction: Flat
+                device: Juggluco
+      responses:
+        '200':
+          description: The entries that were accepted.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NightscoutEntry'
+              example:
+                - type: sgv
+                  sgv: 112
+                  date: 1763672400000
+                  dateString: '2026-11-20T21:00:00.000Z'
+                  direction: Flat
+                  device: Juggluco
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+    get:
+      tags: [Integrations]
+      operationId: listNightscoutEntries
+      summary: Latest readings of the sensor, in Nightscout format
+      description: Some uploaders read the latest entries to avoid gaps. Newest first.
+      security: []
+      parameters:
+        - name: api-secret
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: count
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 10
+      responses:
+        '200':
+          description: The latest readings.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NightscoutEntry'
+              example:
+                - type: sgv
+                  sgv: 112
+                  date: 1763672400000
+                  dateString: '2026-11-20T21:00:00.000Z'
+                  direction: Flat
+                  device: Juggluco
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /v1/nightscout/api/v1/status.json:
+    get:
+      tags: [Integrations]
+      operationId: getNightscoutStatus
+      summary: Nightscout server status
+      description: Uploaders call it to check the connection. Works without the secret, like Nightscout.
+      security: []
+      responses:
+        '200':
+          description: The server is up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NightscoutStatus'
+              example:
+                status: ok
+                name: Voltik
+                version: 0.3.0
+                serverTime: '2026-11-20T21:00:05.000Z'
+                serverTimeEpoch: 1763672405000
+                apiEnabled: true
+                careportalEnabled: false
+                settings:
+                  units: mg/dl
+
   /v1/me/activities:
     get:
       tags: [Activities]
@@ -2074,7 +2233,7 @@ paths:
                 data_source: user_custom
                 category:
                   id: 60000000-0000-4000-8000-000000000002
-                  name: Pão e cereais
+                  name: Pão, cereais e bolos
                 barcode_ean: null
                 is_verified: false
                 is_own: true
@@ -2254,7 +2413,7 @@ paths:
               example:
                 items:
                   - id: 60000000-0000-4000-8000-000000000002
-                    name: Pão e cereais
+                    name: Pão, cereais e bolos
                     food_count: 108
                     created_at: '2026-11-20T00:00:00Z'
                     updated_at: '2026-11-20T00:00:00Z'
@@ -2400,7 +2559,7 @@ paths:
                       data_source: user_custom
                       category:
                         id: 60000000-0000-4000-8000-000000000002
-                        name: Pão e cereais
+                        name: Pão, cereais e bolos
                       barcode_ean: null
                       is_verified: false
                       is_own: false
@@ -2519,7 +2678,7 @@ paths:
                 data_source: user_custom
                 category:
                   id: 60000000-0000-4000-8000-000000000002
-                  name: Pão e cereais
+                  name: Pão, cereais e bolos
                 barcode_ean: null
                 is_verified: false
                 is_own: false
@@ -2873,7 +3032,7 @@ paths:
                 data_source: user_custom
                 category:
                   id: 60000000-0000-4000-8000-000000000002
-                  name: Pão e cereais
+                  name: Pão, cereais e bolos
                 barcode_ean: null
                 is_verified: true
                 is_own: false
@@ -6710,3 +6869,71 @@ components:
           description: '`queued`, `sent`, `delivered`, `undelivered` or `failed`.'
         ErrorCode:
           type: string
+
+    # --- Nightscout ---------------------------------------------------------
+    NightscoutSecret:
+      type: object
+      required: [nightscout_url, api_secret, created_at]
+      properties:
+        nightscout_url:
+          type: string
+          format: uri
+          description: The "Nightscout URL" to set in Juggluco or xDrip+.
+        api_secret:
+          type: string
+          description: The "API secret" to set in the app. Shown only once.
+        created_at:
+          type: string
+          format: date-time
+    NightscoutEntry:
+      type: object
+      description: A Nightscout entry. Voltik reads `type`, `sgv`/`mbg`, `date` and `direction`.
+      required: [type, date]
+      properties:
+        type:
+          type: string
+          description: '`sgv` (sensor) or `mbg` (finger-prick). Others are ignored.'
+        sgv:
+          type: integer
+          description: Sensor glucose in mg/dL.
+        mbg:
+          type: integer
+          description: Meter glucose in mg/dL.
+        date:
+          type: integer
+          format: int64
+          description: When the reading was taken, in milliseconds since 1970-01-01 UTC.
+        dateString:
+          type: string
+        direction:
+          type: string
+          description: Trend arrow, e.g. `Flat`, `FortyFiveUp`, `SingleDown`, `DoubleUp`.
+        device:
+          type: string
+    NightscoutStatus:
+      type: object
+      required: [status, name, version, serverTime, serverTimeEpoch, apiEnabled, careportalEnabled, settings]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        name:
+          type: string
+        version:
+          type: string
+        serverTime:
+          type: string
+        serverTimeEpoch:
+          type: integer
+          format: int64
+        apiEnabled:
+          type: boolean
+        careportalEnabled:
+          type: boolean
+        settings:
+          type: object
+          required: [units]
+          properties:
+            units:
+              type: string
+              enum: [mg/dl]

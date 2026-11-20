@@ -40,10 +40,37 @@ type client struct {
 }
 
 func newAPI(t *testing.T) http.Handler {
+	return newFullAPI(t).Handler
+}
+
+// testAPI is the whole API, with fakes only for what lives outside Voltik
+// (Firebase, Gemini, Open Food Facts), plus the services the background jobs use.
+type testAPI struct {
+	http.Handler
+	store   *repository.Store
+	health  *service.Health
+	alerts  *service.Alerts
+	diary   *service.Diary
+	history *service.History
+}
+
+const testSecret = "0123456789abcdef0123456789abcdef"
+
+func newFullAPI(t *testing.T) testAPI {
 	store := repository.New(dbtest.API(t))
-	tokens := auth.NewTokens([]byte("0123456789abcdef0123456789abcdef"), "local")
-	return handler.NewRouter(handler.Deps{
-		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	tokens := auth.NewTokens([]byte(testSecret), "local")
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	files := service.NewFiles([]byte(testSecret), "http://voltik.test", store)
+	ai := &cannedAI{}
+	a := testAPI{
+		store:   store,
+		health:  service.NewHealth(store, quiet{}, service.NoPredictions{}, log),
+		alerts:  service.NewAlerts(store, quiet{}, quiet{}, log),
+		diary:   service.NewDiary(store, ai, quiet{}, log),
+		history: service.NewHistory(store, ai, quiet{}, files, log),
+	}
+	a.Handler = handler.NewRouter(handler.Deps{
+		Log:         log,
 		Environment: "local",
 		Version:     "test",
 		Tokens:      tokens,
@@ -53,7 +80,17 @@ func newAPI(t *testing.T) http.Handler {
 		Account:     service.NewAccounts(store),
 		Patients:    service.NewPatients(store),
 		Consents:    service.NewConsents(store),
+
+		PublicURL:   "http://voltik.test",
+		HealthData:  a.health,
+		Alerts:      a.alerts,
+		Foods:       service.NewFoods(store, fakeProducts{}, log),
+		Diary:       a.diary,
+		History:     a.history,
+		Files:       files,
+		SMSReceipts: store,
 	})
+	return a
 }
 
 func (c *client) call(method, path, body string) (int, map[string]any) {

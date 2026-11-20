@@ -15,8 +15,12 @@ import (
 	"github.com/voltik/voltik/backend/internal/domain"
 )
 
-// Largest request body accepted.
-const maxBodyBytes = 1 << 20
+// Largest request body accepted: 1 MB, and 6 MB for a meal photo (5 MB of
+// image plus the multipart framing).
+const (
+	maxBodyBytes   = 1 << 20
+	maxUploadBytes = 6 << 20
+)
 
 type requestIDKey struct{}
 type requestMetaKey struct{}
@@ -117,7 +121,11 @@ func withCORS(origins map[string]bool, next http.Handler) http.Handler {
 // agent for consents and the audit log.
 func withRequestMeta(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		limit := int64(maxBodyBytes)
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/photos") {
+			limit = maxUploadBytes
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		meta := domain.RequestMeta{IP: clientIP(r), UserAgent: r.UserAgent()}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestMetaKey{}, meta)))
 	})

@@ -24,6 +24,8 @@ func errorResponse(err error) (int, api.Error) {
 		invalid  *domain.ValidationError
 		pending  *domain.PendingDeletionError
 		outdated *domain.OutdatedDocumentError
+		state    *domain.StateError
+		tooLarge *http.MaxBytesError
 	)
 	status, code, message := http.StatusInternalServerError, "internal_error", "Unexpected server error."
 	details := []api.ErrorDetail{}
@@ -59,6 +61,33 @@ func errorResponse(err error) (int, api.Error) {
 			"Version "+outdated.Version+" of "+outdated.DocumentType+" is not the version in force."
 	case errors.Is(err, domain.ErrProfessionalHasPatients):
 		status, code, message = http.StatusConflict, "professional_has_patients", "End the active follow-ups before deleting this account."
+	case errors.Is(err, domain.ErrForbidden):
+		status, code, message = http.StatusForbidden, "forbidden", "Your profile does not allow this action."
+	case errors.Is(err, domain.ErrConsentRequired):
+		status, code, message = http.StatusForbidden, "consent_required", "This feature needs the external_ai_processing consent."
+	case errors.Is(err, domain.ErrReadingImmutable):
+		status, code, message = http.StatusForbidden, "reading_immutable", "Readings from sensors and health platforms cannot be changed."
+	case errors.Is(err, domain.ErrLinkExpired):
+		status, code, message = http.StatusForbidden, "link_expired", "This link is not valid or has expired. Ask for a new one."
+	case errors.As(err, &state):
+		status, code, message = http.StatusConflict, "invalid_state", state.Message
+	case errors.Is(err, domain.ErrActiveSensorExists):
+		status, code, message = http.StatusConflict, "active_sensor_exists",
+			"Replace the CGM sensor in use with POST /v1/me/devices/{device_id}/replace."
+	case errors.Is(err, domain.ErrBarcodeInUse):
+		status, code, message = http.StatusConflict, "barcode_in_use", "Another food already has this barcode."
+	case errors.Is(err, domain.ErrCategoryNameTaken):
+		status, code, message = http.StatusConflict, "category_name_taken", "A category with this name already exists."
+	case errors.Is(err, domain.ErrComponentExists):
+		status, code, message = http.StatusConflict, "component_exists", "This ingredient is already part of the dish."
+	case errors.Is(err, domain.ErrNoReadings):
+		status, code, message = http.StatusConflict, "no_readings", "There are no glucose readings in this period."
+	case errors.Is(err, domain.ErrAnalysisNotReady):
+		status, code, message = http.StatusConflict, "analysis_not_ready", "The analysis of this photo has not finished."
+	case errors.Is(err, domain.ErrPayloadTooLarge), errors.As(err, &tooLarge):
+		status, code, message = http.StatusRequestEntityTooLarge, "payload_too_large", "The upload is too large."
+	case errors.Is(err, domain.ErrUnsupportedMediaType):
+		status, code, message = http.StatusUnsupportedMediaType, "unsupported_media_type", "Send a JPEG, PNG or WebP image."
 	case errors.Is(err, domain.ErrProviderUnavailable):
 		status, code, message = http.StatusServiceUnavailable, "provider_unavailable", "Sign-in with this identity provider is not available."
 	case errors.Is(err, domain.ErrServiceUnavailable), database.IsUnavailable(err):
