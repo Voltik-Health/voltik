@@ -29,10 +29,14 @@ func AccountFrom(ctx context.Context) (domain.Account, bool) {
 	return a, ok
 }
 
-// IsPublic reports whether the endpoint works without a session token:
-// GET /v1/health and the sign-in endpoints, as in the contract (security: []).
+// IsPublic reports whether the endpoint works without a session token, as
+// in the contract (security: []): GET /v1/health and the sign-in endpoints,
+// and the endpoints that check something else: signed file links, the
+// Nightscout secret and the SMS provider's signature.
 func IsPublic(r *http.Request) bool {
-	return r.URL.Path == "/v1/health" || strings.HasPrefix(r.URL.Path, "/v1/auth/")
+	p := r.URL.Path
+	return p == "/v1/health" || strings.HasPrefix(p, "/v1/auth/") || strings.HasPrefix(p, "/v1/files/") ||
+		strings.HasPrefix(p, "/v1/nightscout/") || p == "/v1/webhooks/sms"
 }
 
 // Middleware lets a request through only with a valid session token of a live,

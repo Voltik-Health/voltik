@@ -12,6 +12,7 @@ import (
 	"github.com/voltik/voltik/backend/internal/api"
 	"github.com/voltik/voltik/backend/internal/auth"
 	"github.com/voltik/voltik/backend/internal/domain"
+	"github.com/voltik/voltik/backend/internal/service"
 )
 
 type HealthChecker interface {
@@ -52,6 +53,17 @@ type Deps struct {
 	Account     AccountService
 	Patients    PatientService
 	Consents    ConsentService
+
+	// Health data (DVT-79)
+	PublicURL       string // e.g. https://voltik-cgm-staging.duckdns.org, for links and the Nightscout URL
+	HealthData      *service.Health
+	Alerts          *service.Alerts
+	Foods           *service.Foods
+	Diary           *service.Diary
+	History         *service.History
+	Files           *service.Files
+	SMSReceipts     SMSReceipts
+	TwilioAuthToken string // checks the signature of the SMS receipts; empty without Twilio
 }
 
 // Server implements api.StrictServerInterface.
@@ -64,6 +76,16 @@ type Server struct {
 	account     AccountService
 	patients    PatientService
 	consents    ConsentService
+
+	publicURL       string
+	healthData      *service.Health
+	alerts          *service.Alerts
+	foods           *service.Foods
+	diary           *service.Diary
+	history         *service.History
+	files           *service.Files
+	smsReceipts     SMSReceipts
+	twilioAuthToken string
 }
 
 var _ api.StrictServerInterface = (*Server)(nil)
@@ -81,6 +103,16 @@ func NewRouter(d Deps) http.Handler {
 		account:     d.Account,
 		patients:    d.Patients,
 		consents:    d.Consents,
+
+		publicURL:       d.PublicURL,
+		healthData:      d.HealthData,
+		alerts:          d.Alerts,
+		foods:           d.Foods,
+		diary:           d.Diary,
+		history:         d.History,
+		files:           d.Files,
+		smsReceipts:     d.SMSReceipts,
+		twilioAuthToken: d.TwilioAuthToken,
 	}
 	badRequestHandler := func(w http.ResponseWriter, r *http.Request, err error) {
 		s.writeError(w, r, &badRequest{message: "The request is not valid: " + err.Error()})
@@ -95,6 +127,7 @@ func NewRouter(d Deps) http.Handler {
 		s.writeError(w, r, domain.ErrNotFound) // unknown route, in the contract's error format
 	})
 	api.HandlerWithOptions(strict, api.StdHTTPServerOptions{BaseRouter: mux, ErrorHandlerFunc: badRequestHandler})
+	s.mountManualRoutes(mux)
 
 	var h http.Handler = mux
 	h = auth.Middleware(d.Tokens, d.Accounts, s.writeError)(h)

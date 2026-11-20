@@ -8,14 +8,21 @@ Clean Architecture: each layer only calls the one below it.
 
 | Folder | What it does |
 |---|---|
-| `cmd/api/` | Entry point: reads the configuration, wires the layers, serves HTTP and runs the retention job. |
+| `cmd/api/` | Entry point: reads the configuration, wires the layers, serves HTTP and starts the background jobs. |
 | `internal/api/` | Types and server interface **generated** from the contract. Never edit `api.gen.go` by hand. |
 | `internal/handler/` | HTTP: turns requests into service calls and results or errors into the contract's responses. Middleware: request id, JSON logs, CORS, caller IP. |
-| `internal/service/` | Business rules: sign-in, account, patient profile, consents. No HTTP, no SQL. |
+| `internal/service/` | Business rules: sign-in, account, patient profile, consents, health data, diary, alerts, reports, signed file links. No HTTP, no SQL. |
 | `internal/repository/` | All the SQL, with pgx. Every query hides soft-deleted rows (`deleted_at IS NULL`). |
 | `internal/domain/` | Business types (`User`, `Patient`, ...), validation rules and errors. Depends on nothing. |
 | `internal/auth/` | Session tokens (JWT), the authentication middleware and the identity providers (Google, Microsoft, Apple, Facebook). |
 | `internal/retention/` | Daily job that erases the accounts deleted more than 30 days ago ([ADR 0006](../docs/adr/0006-account-deletion-and-data-retention.md)). |
+| `internal/push/` | Firebase Cloud Messaging (HTTP v1) and the outbox of alert pushes ([ADR 0008](../docs/adr/0008-alerts-push-and-escalation.md)). |
+| `internal/sms/` | Escalation texts: log only, or Twilio, and its delivery receipts. |
+| `internal/simulator/` | CGM simulator of the demo sensors in staging, with the traces of `tools/cgm-traces` ([ADR 0009](../docs/adr/0009-cgm-data-sources.md)). |
+| `internal/gemini/` | Gemini client: meal photos and report summaries. Iris (DVT-84) reuses it. |
+| `internal/openfoodfacts/` | Packaged products by barcode. |
+| `internal/reportpdf/` | PDF of a clinical report, with the AGP chart. |
+| `internal/jobs/` | Runs the background jobs every few seconds or minutes. |
 | `internal/config/` | Environment variables. |
 | `internal/database/` | Connection pool and transactions; `dbtest/` prepares the database of the integration tests. |
 
@@ -49,8 +56,38 @@ Without the provider variables, every sign-in answers 503 `provider_unavailable`
 | `MICROSOFT_CLIENT_ID` | | Application (client) ID of the Microsoft Entra app registration |
 | `APPLE_CLIENT_IDS` | | Services ID and bundle ID. Apple also stays off while `identity_providers.is_active` is false |
 | `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET` | | Meta app with Facebook Login. The secret only lives on the server |
+| `PUBLIC_URL` | in staging and production | Public address of the API, e.g. `https://voltik-cgm-staging.duckdns.org`. Goes in the signed file links and the Nightscout URL. Default `http://localhost:<PORT>` |
+| `FIREBASE_CREDENTIALS_FILE` or `FIREBASE_CREDENTIALS_BASE64` | | Service-account key of the Firebase project (file path, or the JSON in base64). Without it, pushes fail and alerts go straight to the escalation |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | | Meal photo analysis and report summaries (default model `gemini-2.5-flash`). Without the key, photos end as `failed` and reports have no summary |
+| `OPENFOODFACTS_USER_AGENT` | | How the API identifies itself to Open Food Facts, with a contact email. Default `Voltik/1.0 (voltik.startup@gmail.com)` |
+| `SMS_PROVIDER` | | `log` (default: texts only in the log) or `twilio` |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM` | with `twilio` | Twilio account and sender (number or alphanumeric id) |
+| `SIMULATOR_ENABLED` | | `true` feeds the demo sensors (staging only; refused in production) |
 
 The values for staging and production live in each server's `.env` (voltik-infra), never in Git.
+
+## Background jobs
+
+The API also runs these jobs. Each one is safe with several instances: the work is claimed with row locks (`SKIP LOCKED`), or made idempotent by unique keys.
+
+| Job | Every | What it does |
+|---|---|---|
+| Push outbox | 2 s, and at once after an alert | Sends the pending alert pushes; retries; deactivates dead tokens |
+| Escalation | 30 s | Texts caregivers and emergency contacts about critical alerts nobody acknowledged, then sends the texts |
+| Sensor monitor | 5 min | Sensors without data for 20 minutes, about to expire or expired |
+| Photo analysis | 15 s, and at once after an upload | Analyses meal photos with Gemini |
+| Post-meal impact | 5 min | Glucose change in the 2 hours after each meal |
+| Weekly reports | 10 min | On Mondays from 06:00 (Portugal), last week's report for each patient who has readings |
+| Simulator | 1 min | Readings of the demo sensors (only with `SIMULATOR_ENABLED=true`) |
+| Retention | daily, 03:00 UTC | Erases the accounts deleted 30 days ago |
+
+## Testing with a real CGM sensor
+
+1. Install [Juggluco](https://www.juggluco.nl/) (or xDrip+) on an Android phone and connect it to the sensor (FreeStyle Libre 2/3, Dexcom G7/ONE+, …).
+2. Register the sensor in Voltik (`POST /v1/me/devices`, `device_type: cgm_sensor`), then call `POST /v1/me/devices/{device_id}/nightscout-secret`.
+3. In Juggluco's Nightscout settings, put the `nightscout_url` and the `api_secret` of the answer, and turn the upload on.
+
+Each reading reaches Voltik within a minute, with alerts and push. These apps are not certified medical devices: tests only ([ADR 0009](../docs/adr/0009-cgm-data-sources.md)).
 
 ## Tests
 
@@ -91,3 +128,5 @@ go generate ./...      # runs oapi-codegen v2.8.2 with internal/api/oapi-codegen
 - **Logs** are one JSON line per request (method, path, status, duration, request id). Bodies, tokens, emails and user ids are never logged.
 - **Audit log.** Consent changes and deletion requests write a row to `data_access_audit_log` in the same transaction. The caller's IP is the `X-Real-IP` header set by Nginx, trusted only when the request comes from a private address.
 - **Emails** are only kept when the provider verified them. An account can have no email.
+- **Health data** is written once: batches are idempotent through `idempotency_key`, and only manual readings can be corrected. Days are calendar days in Portugal (`domain.Lisbon`).
+- **Alerts never block the readings.** A failure to raise an alert, push or ask Iris is logged; the readings are already stored (RNF09).

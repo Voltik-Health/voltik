@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Voltik API
-  version: 0.2.0
+  version: 0.3.0
   summary: REST contract between the Voltik apps and the Go API.
   description: |
     Contract between the Voltik clients (Android app and web portal) and the Go API.
@@ -9,9 +9,10 @@ info:
     this file, and the backend implements the same contract. `api/README.md`
     explains how to run the mock server and the linter.
 
-    This version covers group 1 of DVT-76 (base). Groups 2 (diary, history, care
-    team) and 3 (Iris, telemedicine, Dexcom) are added in later pull requests,
-    before the tickets that use them start.
+    This version covers group 1 of DVT-76 (base) and the health data of DVT-79:
+    devices, readings, the food diary, insulin, activity, history, reports and
+    alerts. The care team and group 3 (Iris, telemedicine, Dexcom) are added in
+    later pull requests, before the tickets that use them start.
 
     ## Conventions
 
@@ -49,6 +50,34 @@ info:
       with `POST /v1/me/patient`.
     - **Latest values.** The `.../latest` endpoints answer 204 (no body) while
       there is no data yet.
+    - **Idempotent creates.** Endpoints that create health records take an
+      `idempotency_key` made on the phone. Sending a key that is already stored
+      returns the stored record (200) instead of creating another one (201).
+    - **Deleted health records** leave the apps, the charts and the statistics.
+    - **Days** (`date`, `meal_date`, `start_date`, ...) are calendar days in
+      Portugal (Europe/Lisbon).
+    - **Demo sensor.** In staging, a CGM sensor registered with `brand_model`
+      `Voltik CGM simulator` gets a simulated reading every 5 minutes, after
+      the last 30 days of history are filled in.
+
+    ## Push notifications
+
+    Alerts and finished background work arrive as FCM data messages. Every
+    message has a `type`, and the other keys depend on it:
+
+    | `type` | Other keys | When |
+    | --- | --- | --- |
+    | `alert` | `alert_id`, `recipient_id`, `alert_type`, `severity`, `title`, `body` | An alert was raised for the patient, or for a patient the caregiver follows. Report it with `POST /v1/me/notifications/{recipient_id}/delivered`, and with `.../read` when it is opened. |
+    | `alert_closed` | `alert_id`, `ack_status` | Someone acknowledged or closed the alert: hide it. |
+    | `meal_photo_analyzed` | `meal_id`, `photo_id`, `analysis_status` | The analysis of a meal photo finished. |
+    | `report_ready` | `report_id` | The weekly report is ready. |
+
+    ## Files
+
+    Meal photos and report PDFs are served by `GET /v1/files/{file_id}`
+    through signed links that the API puts in its responses. A link works for
+    15 minutes without the `Authorization` header, so an image loader or a PDF
+    viewer can open it. Ask for the resource again to get a new link.
 
     ## Error codes
 
@@ -60,6 +89,10 @@ info:
     | 401 | `invalid_provider_token` | The identity provider rejected the token |
     | 403 | `account_disabled` | The account is suspended or deactivated |
     | 403 | `account_pending_deletion` | The account is waiting for deletion and cannot sign in |
+    | 403 | `forbidden` | The user's profile does not allow this action |
+    | 403 | `consent_required` | The patient has not accepted the consent the feature needs (`external_ai_processing` for meal photos) |
+    | 403 | `reading_immutable` | Only manual readings can be corrected or deleted |
+    | 403 | `link_expired` | The signed file link is not valid or has expired |
     | 404 | `not_found` | The resource does not exist or belongs to someone else |
     | 404 | `patient_profile_not_found` | Patient onboarding not completed |
     | 409 | `email_in_use` | The email already has an account under another provider |
@@ -67,6 +100,15 @@ info:
     | 409 | `mandatory_consent` | Mandatory consents cannot be revoked |
     | 409 | `document_outdated` | A newer version of the legal document is in force |
     | 409 | `professional_has_patients` | A clinician with active follow-ups cannot delete the account |
+    | 409 | `invalid_state` | The resource is not in a state that allows the action, e.g. eating a cancelled meal |
+    | 409 | `active_sensor_exists` | The patient already has a CGM sensor in use: replace it instead |
+    | 409 | `barcode_in_use` | Another food already has this barcode |
+    | 409 | `category_name_taken` | A food category with this name already exists |
+    | 409 | `component_exists` | The ingredient is already part of the dish |
+    | 409 | `no_readings` | The period has no glucose readings |
+    | 409 | `analysis_not_ready` | The analysis of the photo has not finished |
+    | 413 | `payload_too_large` | The uploaded file is too large |
+    | 415 | `unsupported_media_type` | The uploaded file type is not accepted |
     | 429 | `rate_limited` | Too many requests; retry after the `Retry-After` header |
     | 500 | `internal_error` | Unexpected server error |
     | 503 | `service_unavailable` | The database or another dependency is down |
@@ -106,6 +148,28 @@ tags:
     description: Glucose and sensor alerts raised for the patient.
   - name: Devices
     description: Sensors, meters, watches and bands linked to the patient.
+  - name: Activities
+    description: Physical activity, typed by the patient or imported from watches.
+  - name: Foods
+    description: The food catalogue. It has the Portuguese food composition table (INSA), packaged products found by barcode (Open Food Facts) and foods created by users.
+  - name: Meals
+    description: The food diary, with planned and eaten meals, their items and photos.
+  - name: Insulin
+    description: Insulin doses the patient took. Voltik never calculates or suggests doses.
+  - name: Stats
+    description: Glucose metrics for a period, such as time in range, mean, variability, GMI and episodes.
+  - name: Reports
+    description: Saved clinical reports and their PDF.
+  - name: Notifications
+    description: Delivery and read receipts of alert notifications.
+  - name: Food catalogue
+    description: Managing the food catalogue, for platform admins and nutrition professionals.
+  - name: Files
+    description: Meal photos and report PDFs, through signed links.
+  - name: Webhooks
+    description: Calls from external providers. Not for the apps.
+  - name: Integrations
+    description: Uploads from other apps (Juggluco, xDrip+) through the Nightscout API. Not for the Voltik apps.
 
 paths:
   /v1/health:
@@ -601,6 +665,7 @@ paths:
                 critical_high_mg_dl: 250
                 weight_kg: null
                 height_cm: null
+                weekly_reports_enabled: true
                 created_at: '2026-10-01T08:15:00Z'
                 updated_at: '2026-10-01T08:15:00Z'
         '400':
@@ -660,6 +725,7 @@ paths:
                 critical_high_mg_dl: 250
                 weight_kg: 82.5
                 height_cm: 174
+                weekly_reports_enabled: true
                 created_at: '2026-10-01T08:15:00Z'
                 updated_at: '2026-10-03T19:02:00Z'
         '401':
@@ -704,6 +770,7 @@ paths:
                 critical_high_mg_dl: 250
                 weight_kg: 81.5
                 height_cm: 174
+                weekly_reports_enabled: true
                 created_at: '2026-10-01T08:15:00Z'
                 updated_at: '2026-10-16T10:12:00Z'
         '400':
@@ -773,6 +840,175 @@ paths:
                     idempotency_key: 7a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
                     created_at: '2026-10-16T09:25:05Z'
                 next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+    post:
+      tags: [Glucose]
+      operationId: createGlucoseReading
+      summary: Log a manual glucose reading
+      description: |
+        A finger-prick reading typed by the patient. It is stored with `source`
+        `manual_fingerstick` and no device. When the meter shows "LO" or "HI",
+        send 20 or 550. A reading at or past the patient's critical limits
+        raises an alert, like a sensor reading. Sending an `idempotency_key`
+        that is already stored returns that reading (200) and changes nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualGlucoseReadingCreate'
+            example:
+              idempotency_key: 0b6f3a52-7c1d-4e8a-9f20-6d4c3b2a1e0f
+              measured_at: '2026-10-16T12:55:00Z'
+              value_mg_dl: 142
+      responses:
+        '200':
+          description: A reading with this `idempotency_key` was already stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlucoseReading'
+              example:
+                id: 184260
+                measured_at: '2026-10-16T12:55:00Z'
+                value_mg_dl: 142
+                trend: unknown
+                source: manual_fingerstick
+                device_id: null
+                signal_quality: null
+                idempotency_key: 0b6f3a52-7c1d-4e8a-9f20-6d4c3b2a1e0f
+                created_at: '2026-10-16T12:55:20Z'
+        '201':
+          description: Reading stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlucoseReading'
+              example:
+                id: 184260
+                measured_at: '2026-10-16T12:55:00Z'
+                value_mg_dl: 142
+                trend: unknown
+                source: manual_fingerstick
+                device_id: null
+                signal_quality: null
+                idempotency_key: 0b6f3a52-7c1d-4e8a-9f20-6d4c3b2a1e0f
+                created_at: '2026-10-16T12:55:20Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/glucose-readings/{reading_id}:
+    patch:
+      tags: [Glucose]
+      operationId: updateGlucoseReading
+      summary: Correct a manual reading
+      description: |
+        Only manual readings (`manual_fingerstick`) can be corrected. Readings
+        from a sensor or a health platform answer 403 `reading_immutable`. An
+        alert that the reading raised stays in the history.
+      parameters:
+        - $ref: '#/components/parameters/ReadingId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GlucoseReadingUpdate'
+            example:
+              value_mg_dl: 124
+      responses:
+        '200':
+          description: The reading after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlucoseReading'
+              example:
+                id: 184260
+                measured_at: '2026-10-16T12:55:00Z'
+                value_mg_dl: 124
+                trend: unknown
+                source: manual_fingerstick
+                device_id: null
+                signal_quality: null
+                idempotency_key: 0b6f3a52-7c1d-4e8a-9f20-6d4c3b2a1e0f
+                created_at: '2026-10-16T12:55:20Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/ReadingImmutable'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Glucose]
+      operationId: deleteGlucoseReading
+      summary: Delete a manual reading
+      description: |
+        The reading leaves the charts and the statistics. Only manual readings
+        can be deleted; the others answer 403 `reading_immutable`.
+      parameters:
+        - $ref: '#/components/parameters/ReadingId'
+      responses:
+        '204':
+          description: Reading deleted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/ReadingImmutable'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/me/glucose-readings/series:
+    get:
+      tags: [Glucose]
+      operationId: getGlucoseSeries
+      summary: Glucose grouped in time buckets, for long charts
+      description: |
+        Mean, minimum and maximum of each bucket, for charts longer than 7 days.
+        The buckets start at `from` and last `resolution`. Buckets without
+        readings are left out. The range can be at most 90 days.
+      parameters:
+        - $ref: '#/components/parameters/RangeFrom'
+        - $ref: '#/components/parameters/RangeTo'
+        - name: resolution
+          in: query
+          description: Length of each bucket.
+          schema:
+            $ref: '#/components/schemas/GlucoseResolution'
+      responses:
+        '200':
+          description: The buckets that have readings, oldest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlucoseSeries'
+              example:
+                resolution: 15m
+                items:
+                  - bucket_start: '2026-10-16T09:00:00Z'
+                    mean_mg_dl: 131
+                    min_mg_dl: 126
+                    max_mg_dl: 137
+                    readings_count: 3
+                  - bucket_start: '2026-10-16T09:15:00Z'
+                    mean_mg_dl: 118
+                    min_mg_dl: 108
+                    max_mg_dl: 128
+                    readings_count: 3
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -979,7 +1215,9 @@ paths:
       tags: [Alerts]
       operationId: listAlerts
       summary: List the patient's alerts
-      description: Newest first, by `triggered_at`.
+      description: |
+        Newest first, by `triggered_at`. Each alert lists its `recipients`: who
+        was notified, by which channel, and how far each notification got.
       parameters:
         - name: ack_status
           in: query
@@ -998,6 +1236,16 @@ paths:
           schema:
             type: string
             format: date-time
+        - name: alert_type
+          in: query
+          description: Only alerts of this type.
+          schema:
+            $ref: '#/components/schemas/AlertType'
+        - name: severity
+          in: query
+          description: Only alerts of this severity.
+          schema:
+            $ref: '#/components/schemas/AlertSeverity'
         - $ref: '#/components/parameters/ListLimit'
         - $ref: '#/components/parameters/Cursor'
       responses:
@@ -1022,6 +1270,29 @@ paths:
                     source_reading_id: 183950
                     source_prediction_id: null
                     device_id: null
+                    source_value_mg_dl: 52
+                    acknowledged_by:
+                      user_id: 20000000-0000-4000-8000-000000000001
+                      full_name: Manuel Sousa
+                    recipients:
+                      - id: 81000000-0000-4000-8000-000000000001
+                        user_id: 20000000-0000-4000-8000-000000000001
+                        full_name: Manuel Sousa
+                        channel: push
+                        delivery_status: acknowledged
+                        sent_at: '2026-10-15T16:42:02Z'
+                        delivered_at: '2026-10-15T16:42:03Z'
+                        read_at: '2026-10-15T16:43:05Z'
+                        acknowledged_at: '2026-10-15T16:43:10Z'
+                      - id: 81000000-0000-4000-8000-000000000002
+                        user_id: 20000000-0000-4000-8000-000000000001
+                        full_name: Manuel Sousa
+                        channel: in_app
+                        delivery_status: read
+                        sent_at: '2026-10-15T16:42:01Z'
+                        delivered_at: '2026-10-15T16:42:30Z'
+                        read_at: '2026-10-15T16:43:05Z'
+                        acknowledged_at: null
                     created_at: '2026-10-15T16:42:01Z'
                   - id: 80000000-0000-4000-8000-000000000001
                     alert_type: sensor_expiring
@@ -1036,6 +1307,18 @@ paths:
                     source_reading_id: null
                     source_prediction_id: null
                     device_id: 50000000-0000-4000-8000-000000000001
+                    source_value_mg_dl: null
+                    acknowledged_by: null
+                    recipients:
+                      - id: 81000000-0000-4000-8000-000000000003
+                        user_id: 20000000-0000-4000-8000-000000000001
+                        full_name: Manuel Sousa
+                        channel: push
+                        delivery_status: delivered
+                        sent_at: '2026-10-14T08:00:01Z'
+                        delivered_at: '2026-10-14T08:00:02Z'
+                        read_at: null
+                        acknowledged_at: null
                     created_at: '2026-10-14T08:00:00Z'
                 next_cursor: null
         '400':
@@ -1051,8 +1334,9 @@ paths:
       operationId: acknowledgeAlert
       summary: Acknowledge an alert
       description: |
-        Marks a pending alert as acknowledged by the caller. Acknowledging an alert
-        that is no longer pending returns it unchanged.
+        Marks a pending alert as acknowledged by the caller. It stops the
+        escalation, and the other recipients get an `alert_closed` push.
+        Acknowledging an alert that is no longer pending returns it unchanged.
       parameters:
         - $ref: '#/components/parameters/AlertId'
       responses:
@@ -1076,6 +1360,20 @@ paths:
                 source_reading_id: null
                 source_prediction_id: null
                 device_id: 50000000-0000-4000-8000-000000000001
+                source_value_mg_dl: null
+                acknowledged_by:
+                  user_id: 20000000-0000-4000-8000-000000000001
+                  full_name: Manuel Sousa
+                recipients:
+                  - id: 81000000-0000-4000-8000-000000000003
+                    user_id: 20000000-0000-4000-8000-000000000001
+                    full_name: Manuel Sousa
+                    channel: push
+                    delivery_status: acknowledged
+                    sent_at: '2026-10-14T08:00:01Z'
+                    delivered_at: '2026-10-14T08:00:02Z'
+                    read_at: '2026-10-16T09:30:50Z'
+                    acknowledged_at: '2026-10-16T09:31:00Z'
                 created_at: '2026-10-14T08:00:00Z'
         '400':
           $ref: '#/components/responses/BadRequest'
@@ -1100,6 +1398,110 @@ paths:
                     code: patient_profile_not_found
                     message: Complete onboarding with POST /v1/me/patient first.
                     details: []
+
+  /v1/me/alerts/{alert_id}/resolve:
+    post:
+      tags: [Alerts]
+      operationId: resolveAlert
+      summary: Close an alert
+      description: |
+        `resolved` closes an alert that was handled, optionally with a note.
+        `dismissed` closes a false alarm, e.g. a low reading caused by pressure
+        on the sensor. Closing an alert stops its escalation. A closed alert
+        never goes back to pending, and closing it again returns it unchanged.
+      parameters:
+        - $ref: '#/components/parameters/AlertId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertResolution'
+            example:
+              status: resolved
+              resolution_notes: Comi um sumo e a glicemia voltou aos 95.
+      responses:
+        '200':
+          description: The alert after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alert'
+              example:
+                id: 80000000-0000-4000-8000-000000000002
+                alert_type: critical_low
+                severity: critical
+                title: Glicemia muito baixa
+                message: A glicemia está em 52 mg/dL e a descer.
+                iris_suggested_action: Siga o seu plano para hipoglicemia e volte a medir dentro de 15 minutos.
+                triggered_at: '2026-10-15T16:42:00Z'
+                ack_status: resolved
+                acknowledged_at: '2026-10-15T16:43:10Z'
+                resolution_notes: Comi um sumo e a glicemia voltou aos 95.
+                source_reading_id: 183950
+                source_prediction_id: null
+                device_id: null
+                source_value_mg_dl: 52
+                acknowledged_by:
+                  user_id: 20000000-0000-4000-8000-000000000001
+                  full_name: Manuel Sousa
+                recipients:
+                  - id: 81000000-0000-4000-8000-000000000001
+                    user_id: 20000000-0000-4000-8000-000000000001
+                    full_name: Manuel Sousa
+                    channel: push
+                    delivery_status: acknowledged
+                    sent_at: '2026-10-15T16:42:02Z'
+                    delivered_at: '2026-10-15T16:42:03Z'
+                    read_at: '2026-10-15T16:43:05Z'
+                    acknowledged_at: '2026-10-15T16:43:10Z'
+                created_at: '2026-10-15T16:42:01Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/me/notifications/{recipient_id}/delivered:
+    post:
+      tags: [Notifications]
+      operationId: markNotificationDelivered
+      summary: Report that a notification reached the phone
+      description: |
+        Call it when the app receives an alert push (`recipient_id` comes in the
+        message) or shows an alert inside the app (its `recipients` row for the
+        channel `in_app`). The state never goes back: a notification that was
+        already read stays read.
+      parameters:
+        - $ref: '#/components/parameters/RecipientId'
+      responses:
+        '204':
+          description: Receipt recorded.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/me/notifications/{recipient_id}/read:
+    post:
+      tags: [Notifications]
+      operationId: markNotificationRead
+      summary: Report that the user opened a notification
+      description: Call it when the user taps the push or opens the alert in the app.
+      parameters:
+        - $ref: '#/components/parameters/RecipientId'
+      responses:
+        '204':
+          description: Receipt recorded.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /v1/me/devices:
     get:
@@ -1149,6 +1551,11 @@ paths:
         Registers a sensor, meter, watch or band. Use the returned `id` as
         `device_id` when uploading its data. Registering the same `serial_or_mac`
         again returns the existing device (200).
+
+        A CGM sensor starts `warming_up` and becomes `active` with its first
+        reading. A patient has one CGM sensor in use at a time: registering a
+        second one answers 409 `active_sensor_exists`, so use
+        `POST /v1/me/devices/{device_id}/replace` instead.
       requestBody:
         required: true
         content:
@@ -1203,6 +1610,2722 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/NoPatientProfile'
+        '409':
+          description: The patient already has a CGM sensor in use.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: active_sensor_exists
+                message: Replace the CGM sensor in use with POST /v1/me/devices/{device_id}/replace.
+                details: []
+
+  /v1/me/devices/{device_id}:
+    delete:
+      tags: [Devices]
+      operationId: removeDevice
+      summary: Remove a device
+      description: |
+        The device stops syncing and leaves the list. Its readings stay in the
+        history: removing a device never deletes data.
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      responses:
+        '204':
+          description: Device removed.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/me/devices/{device_id}/status:
+    patch:
+      tags: [Devices]
+      operationId: updateDeviceStatus
+      summary: Report the state of a device
+      description: |
+        The app sends the battery level, whether the device is connected and the
+        time of its latest reading. The API also updates the status by itself: a
+        CGM sensor leaves `warming_up` with its first reading, becomes
+        `disconnected` after 20 minutes without data and `expired` once
+        `sensor_expires_at` has passed.
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceStatusUpdate'
+            example:
+              connection_status: active
+              battery_percent: 58
+              last_reading_at: '2026-10-16T09:30:00Z'
+      responses:
+        '200':
+          description: The device after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+              example:
+                id: 50000000-0000-4000-8000-000000000002
+                device_type: smartwatch
+                brand_model: Samsung Galaxy Watch6
+                serial_or_mac: 'D4:3A:2C:91:7F:10'
+                connection_status: active
+                battery_percent: 58
+                first_reading_at: '2026-10-02T07:05:00Z'
+                sensor_expires_at: null
+                last_synced_at: '2026-10-16T09:30:00Z'
+                created_at: '2026-10-02T07:01:00Z'
+                updated_at: '2026-10-16T09:30:04Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/me/devices/{device_id}/replace:
+    post:
+      tags: [Devices]
+      operationId: replaceSensor
+      summary: Replace a CGM sensor
+      description: |
+        Pairs a new CGM sensor in place of this one, in one step. The old sensor
+        becomes `replaced` and keeps its readings; the new one starts
+        `warming_up`. Only CGM sensors can be replaced, and the new device must
+        be a CGM sensor too.
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceCreate'
+            example:
+              device_type: cgm_sensor
+              brand_model: Voltik CGM simulator
+              serial_or_mac: SIM-0002
+              sensor_expires_at: '2026-10-30T09:40:00Z'
+      responses:
+        '201':
+          description: The new sensor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+              example:
+                id: 50000000-0000-4000-8000-000000000003
+                device_type: cgm_sensor
+                brand_model: Voltik CGM simulator
+                serial_or_mac: SIM-0002
+                connection_status: warming_up
+                battery_percent: null
+                first_reading_at: null
+                sensor_expires_at: '2026-10-30T09:40:00Z'
+                last_synced_at: null
+                created_at: '2026-10-16T09:40:00Z'
+                updated_at: '2026-10-16T09:40:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+
+  /v1/me/devices/{device_id}/nightscout-secret:
+    post:
+      tags: [Devices]
+      operationId: createNightscoutSecret
+      summary: Let Juggluco or xDrip+ upload this sensor's readings
+      description: |
+        For testing with a real CGM sensor. Apps such as Juggluco and xDrip+
+        read FreeStyle Libre and Dexcom sensors over Bluetooth and can upload
+        each reading to a Nightscout server. Voltik answers the Nightscout
+        upload API: put `nightscout_url` and `api_secret` in the app's
+        Nightscout settings, and every reading reaches Voltik within a minute,
+        with alerts and push.
+
+        The device must be a CGM sensor. The secret is shown only once; asking
+        again creates a new one and the old one stops working. These apps are
+        not certified medical devices: use them for testing only.
+      parameters:
+        - $ref: '#/components/parameters/DeviceId'
+      responses:
+        '201':
+          description: The settings for the uploader app.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NightscoutSecret'
+              example:
+                nightscout_url: https://voltik-cgm-staging.duckdns.org/v1/nightscout
+                api_secret: k7qm3x9vfa2wp8re
+                created_at: '2026-11-20T21:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+
+  /v1/nightscout/api/v1/entries:
+    post:
+      tags: [Integrations]
+      operationId: uploadNightscoutEntries
+      summary: Nightscout upload of sensor readings
+      description: |
+        The part of the Nightscout API that Juggluco and xDrip+ use to upload
+        readings. Not for the Voltik apps. The uploader authenticates with the
+        `api-secret` header: the SHA-1 of the secret from
+        `POST /v1/me/devices/{device_id}/nightscout-secret` (the secret itself
+        is accepted too). `sgv` entries become CGM readings of that sensor,
+        `mbg` entries become manual readings, and other types are ignored.
+        Resending an entry changes nothing.
+      security: []
+      parameters:
+        - name: api-secret
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              maxItems: 1000
+              items:
+                $ref: '#/components/schemas/NightscoutEntry'
+            example:
+              - type: sgv
+                sgv: 112
+                date: 1763672400000
+                dateString: '2026-11-20T21:00:00.000Z'
+                direction: Flat
+                device: Juggluco
+      responses:
+        '200':
+          description: The entries that were accepted.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NightscoutEntry'
+              example:
+                - type: sgv
+                  sgv: 112
+                  date: 1763672400000
+                  dateString: '2026-11-20T21:00:00.000Z'
+                  direction: Flat
+                  device: Juggluco
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+    get:
+      tags: [Integrations]
+      operationId: listNightscoutEntries
+      summary: Latest readings of the sensor, in Nightscout format
+      description: Some uploaders read the latest entries to avoid gaps. Newest first.
+      security: []
+      parameters:
+        - name: api-secret
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: count
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 10
+      responses:
+        '200':
+          description: The latest readings.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NightscoutEntry'
+              example:
+                - type: sgv
+                  sgv: 112
+                  date: 1763672400000
+                  dateString: '2026-11-20T21:00:00.000Z'
+                  direction: Flat
+                  device: Juggluco
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /v1/nightscout/api/v1/status.json:
+    get:
+      tags: [Integrations]
+      operationId: getNightscoutStatus
+      summary: Nightscout server status
+      description: Uploaders call it to check the connection. Works without the secret, like Nightscout.
+      security: []
+      responses:
+        '200':
+          description: The server is up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NightscoutStatus'
+              example:
+                status: ok
+                name: Voltik
+                version: 0.3.0
+                serverTime: '2026-11-20T21:00:05.000Z'
+                serverTimeEpoch: 1763672405000
+                apiEnabled: true
+                careportalEnabled: false
+                settings:
+                  units: mg/dl
+
+  /v1/me/activities:
+    get:
+      tags: [Activities]
+      operationId: listActivities
+      summary: List physical activities in a time range
+      description: Activities with `from <= started_at < to`, oldest first. The range can be at most 90 days.
+      parameters:
+        - $ref: '#/components/parameters/RangeFrom'
+        - $ref: '#/components/parameters/RangeTo'
+      responses:
+        '200':
+          description: The activities.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityList'
+              example:
+                items:
+                  - id: 67000000-0000-4000-8000-000000000001
+                    activity_name: Caminhada
+                    started_at: '2026-10-16T07:10:00Z'
+                    duration_minutes: 35
+                    intensity: moderate
+                    total_steps: 4120
+                    avg_heart_rate_bpm: 104
+                    calories_burned_kcal: 180
+                    device_id: 50000000-0000-4000-8000-000000000002
+                    idempotency_key: hc-exercise-7f3a91c2
+                    created_at: '2026-10-16T08:00:12Z'
+                    updated_at: '2026-10-16T08:00:12Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+    post:
+      tags: [Activities]
+      operationId: createActivity
+      summary: Log a physical activity
+      description: |
+        An activity typed by the patient. Sending an `idempotency_key` that is
+        already stored returns that activity (200) and changes nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivityCreate'
+            example:
+              idempotency_key: 2c1f7b9e-3d4a-4e5f-8a6b-7c8d9e0f1a2b
+              activity_name: Jardinagem
+              started_at: '2026-10-16T16:00:00Z'
+              duration_minutes: 45
+              intensity: light
+      responses:
+        '200':
+          description: An activity with this `idempotency_key` was already stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Activity'
+              example:
+                id: 67000000-0000-4000-8000-000000000002
+                activity_name: Jardinagem
+                started_at: '2026-10-16T16:00:00Z'
+                duration_minutes: 45
+                intensity: light
+                total_steps: null
+                avg_heart_rate_bpm: null
+                calories_burned_kcal: null
+                device_id: null
+                idempotency_key: 2c1f7b9e-3d4a-4e5f-8a6b-7c8d9e0f1a2b
+                created_at: '2026-10-16T16:50:00Z'
+                updated_at: '2026-10-16T16:50:00Z'
+        '201':
+          description: Activity stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Activity'
+              example:
+                id: 67000000-0000-4000-8000-000000000002
+                activity_name: Jardinagem
+                started_at: '2026-10-16T16:00:00Z'
+                duration_minutes: 45
+                intensity: light
+                total_steps: null
+                avg_heart_rate_bpm: null
+                calories_burned_kcal: null
+                device_id: null
+                idempotency_key: 2c1f7b9e-3d4a-4e5f-8a6b-7c8d9e0f1a2b
+                created_at: '2026-10-16T16:50:00Z'
+                updated_at: '2026-10-16T16:50:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/activities/batch:
+    post:
+      tags: [Activities]
+      operationId: ingestActivities
+      summary: Upload a batch of activities from a watch
+      description: |
+        Exercise sessions read from Health Connect. Same rules as
+        `POST /v1/me/glucose-readings/batch`: up to 500 items, idempotent
+        through `idempotency_key` (use the Health Connect session id), and
+        partial acceptance. `device_id` is the watch the session came from.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivityBatch'
+            example:
+              activities:
+                - idempotency_key: hc-exercise-7f3a91c2
+                  activity_name: Caminhada
+                  started_at: '2026-10-16T07:10:00Z'
+                  duration_minutes: 35
+                  intensity: moderate
+                  total_steps: 4120
+                  avg_heart_rate_bpm: 104
+                  calories_burned_kcal: 180
+                  device_id: 50000000-0000-4000-8000-000000000002
+      responses:
+        '200':
+          description: Batch processed. The counts say what happened to each activity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResult'
+              example:
+                inserted: 1
+                duplicates: 0
+                rejected: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/activities/{activity_id}:
+    patch:
+      tags: [Activities]
+      operationId: updateActivity
+      summary: Correct an activity
+      parameters:
+        - $ref: '#/components/parameters/ActivityId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivityUpdate'
+            example:
+              duration_minutes: 50
+              intensity: moderate
+      responses:
+        '200':
+          description: The activity after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Activity'
+              example:
+                id: 67000000-0000-4000-8000-000000000002
+                activity_name: Jardinagem
+                started_at: '2026-10-16T16:00:00Z'
+                duration_minutes: 50
+                intensity: moderate
+                total_steps: null
+                avg_heart_rate_bpm: null
+                calories_burned_kcal: null
+                device_id: null
+                idempotency_key: 2c1f7b9e-3d4a-4e5f-8a6b-7c8d9e0f1a2b
+                created_at: '2026-10-16T16:50:00Z'
+                updated_at: '2026-10-16T17:05:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Activities]
+      operationId: deleteActivity
+      summary: Delete an activity
+      parameters:
+        - $ref: '#/components/parameters/ActivityId'
+      responses:
+        '204':
+          description: Activity deleted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/foods:
+    get:
+      tags: [Foods]
+      operationId: searchFoods
+      summary: Search the food catalogue
+      description: |
+        Matches food names ignoring accents and case, so "pao" finds "Pão".
+        Verified foods and composite dishes come first. The catalogue has the
+        Portuguese food composition table (INSA), the packaged products already
+        found by barcode, and the foods created by users. A food a user created
+        is visible only to them until a reviewer verifies it.
+
+        Show each food's `source_attribution` where its values appear: the
+        licences of the INSA table and of Open Food Facts require it.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: At least 2 characters.
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 100
+          example: caldo verde
+        - name: limit
+          in: query
+          description: Maximum number of results.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        '200':
+          description: The best matches.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodList'
+              example:
+                items:
+                  - id: 61000000-0000-4000-8000-000000000001
+                    food_name: Sopa, caldo verde
+                    brand: null
+                    food_type: composite_dish
+                    data_source: insa
+                    category:
+                      id: 60000000-0000-4000-8000-000000000001
+                      name: Pratos e sopas
+                    barcode_ean: null
+                    is_verified: true
+                    is_own: false
+                    source_attribution: 'Fonte: Base de Dados da Composição de Alimentos. Instituto Nacional de Saúde Doutor Ricardo Jorge, I. P. - INSA. v 7.1 - 2026'
+                    servings:
+                      - id: 62000000-0000-4000-8000-000000000001
+                        serving_description: 100 g
+                        metric_amount: 100
+                        metric_unit: g
+                        carbs_g: 5.3
+                        fiber_g: 0.8
+                        sugars_g: 0.7
+                        calories_kcal: 43
+                        protein_g: 1.3
+                        fat_g: 1.7
+                        saturated_fat_g: 0.3
+                        sodium_mg: 260
+                      - id: 62000000-0000-4000-8000-000000000002
+                        serving_description: 1 prato (300 g)
+                        metric_amount: 300
+                        metric_unit: g
+                        carbs_g: 15.9
+                        fiber_g: 2.4
+                        sugars_g: 2.1
+                        calories_kcal: 129
+                        protein_g: 3.9
+                        fat_g: 5.1
+                        saturated_fat_g: 0.9
+                        sodium_mg: 780
+                    components: []
+                    created_at: '2026-11-20T00:00:00Z'
+                    updated_at: '2026-11-20T00:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+    post:
+      tags: [Foods]
+      operationId: createFood
+      summary: Create a food
+      description: |
+        Adds a food that is missing from the catalogue (`data_source`
+        `user_custom`, not verified). Only the author sees it until a reviewer
+        verifies it. Every serving needs carbohydrates and calories. Sugars
+        cannot exceed carbohydrates and saturated fat cannot exceed fat. Fibre
+        is not limited, because European tables and labels do not count it in
+        the carbohydrates.
+
+        A barcode that another food already has answers 409 `barcode_in_use`.
+        Show that food instead, with `GET /v1/foods/barcode/{ean}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FoodCreate'
+            example:
+              food_name: Broa de milho da avó
+              food_type: generic
+              category_id: 60000000-0000-4000-8000-000000000002
+              servings:
+                - serving_description: 1 fatia (50 g)
+                  metric_amount: 50
+                  metric_unit: g
+                  carbs_g: 24
+                  calories_kcal: 120
+                  fiber_g: 2.1
+      responses:
+        '201':
+          description: Food created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Food'
+              example:
+                id: 61000000-0000-4000-8000-000000000009
+                food_name: Broa de milho da avó
+                brand: null
+                food_type: generic
+                data_source: user_custom
+                category:
+                  id: 60000000-0000-4000-8000-000000000002
+                  name: Pão, cereais e bolos
+                barcode_ean: null
+                is_verified: false
+                is_own: true
+                source_attribution: null
+                servings:
+                  - id: 62000000-0000-4000-8000-000000000009
+                    serving_description: 1 fatia (50 g)
+                    metric_amount: 50
+                    metric_unit: g
+                    carbs_g: 24
+                    fiber_g: 2.1
+                    sugars_g: 0
+                    calories_kcal: 120
+                    protein_g: 0
+                    fat_g: 0
+                    saturated_fat_g: 0
+                    sodium_mg: 0
+                components: []
+                created_at: '2026-10-16T13:10:00Z'
+                updated_at: '2026-10-16T13:10:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+        '409':
+          description: Another food already has this barcode.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: barcode_in_use
+                message: Another food already has barcode 5601234567890.
+                details: []
+
+  /v1/foods/barcode/{ean}:
+    get:
+      tags: [Foods]
+      operationId: getFoodByBarcode
+      summary: Find a packaged product by its barcode
+      description: |
+        Looks the EAN or UPC code up in the catalogue and, when it is not there,
+        in Open Food Facts, saving the product for next time.
+
+        - 404: nobody knows the code. Offer to create the food with this barcode (`POST /v1/foods`).
+        - 503: Open Food Facts could not be reached and the code is not in the catalogue yet. Try again later or create the food.
+      parameters:
+        - $ref: '#/components/parameters/Barcode'
+      responses:
+        '200':
+          description: The product with its servings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Food'
+              example:
+                id: 61000000-0000-4000-8000-000000000005
+                food_name: Iogurte natural
+                brand: Marca Exemplo
+                food_type: brand
+                data_source: open_food_facts
+                category: null
+                barcode_ean: '5601234567890'
+                is_verified: false
+                is_own: false
+                source_attribution: 'Fonte: Open Food Facts (openfoodfacts.org), licença ODbL'
+                servings:
+                  - id: 62000000-0000-4000-8000-000000000005
+                    serving_description: 100 g
+                    metric_amount: 100
+                    metric_unit: g
+                    carbs_g: 5.2
+                    fiber_g: 0
+                    sugars_g: 5.2
+                    calories_kcal: 61
+                    protein_g: 3.9
+                    fat_g: 3.1
+                    saturated_fat_g: 2
+                    sodium_mg: 40
+                  - id: 62000000-0000-4000-8000-000000000006
+                    serving_description: 1 embalagem (120 g)
+                    metric_amount: 120
+                    metric_unit: g
+                    carbs_g: 6.24
+                    fiber_g: 0
+                    sugars_g: 6.24
+                    calories_kcal: 73.2
+                    protein_g: 4.68
+                    fat_g: 3.72
+                    saturated_fat_g: 2.4
+                    sodium_mg: 48
+                components: []
+                created_at: '2026-10-16T13:20:00Z'
+                updated_at: '2026-10-16T13:20:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/foods/{food_id}:
+    get:
+      tags: [Foods]
+      operationId: getFood
+      summary: Get a food with its servings
+      parameters:
+        - $ref: '#/components/parameters/FoodId'
+      responses:
+        '200':
+          description: The food.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Food'
+              example:
+                id: 61000000-0000-4000-8000-000000000002
+                food_name: Arroz de pato à moda de Braga
+                brand: null
+                food_type: composite_dish
+                data_source: portuguese_traditional
+                category:
+                  id: 60000000-0000-4000-8000-000000000001
+                  name: Pratos e sopas
+                barcode_ean: null
+                is_verified: true
+                is_own: false
+                source_attribution: null
+                servings:
+                  - id: 62000000-0000-4000-8000-000000000003
+                    serving_description: 1 prato (350 g)
+                    metric_amount: 350
+                    metric_unit: g
+                    carbs_g: 61.6
+                    fiber_g: 1.8
+                    sugars_g: 1.4
+                    calories_kcal: 598
+                    protein_g: 31.5
+                    fat_g: 27.3
+                    saturated_fat_g: 8.1
+                    sodium_mg: 910
+                components:
+                  - id: 6a000000-0000-4000-8000-000000000001
+                    component_food_id: 61000000-0000-4000-8000-000000000003
+                    food_name: Arroz carolino cozido
+                    default_quantity_g: 200
+                  - id: 6a000000-0000-4000-8000-000000000002
+                    component_food_id: 61000000-0000-4000-8000-000000000004
+                    food_name: Pato assado, carne
+                    default_quantity_g: 150
+                created_at: '2026-10-10T10:00:00Z'
+                updated_at: '2026-10-10T10:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/food-categories:
+    get:
+      tags: [Foods]
+      operationId: listFoodCategories
+      summary: List the food categories
+      description: For the category picker when creating a food. Sorted by name.
+      responses:
+        '200':
+          description: The categories.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodCategoryList'
+              example:
+                items:
+                  - id: 60000000-0000-4000-8000-000000000002
+                    name: Pão, cereais e bolos
+                    food_count: 108
+                    created_at: '2026-11-20T00:00:00Z'
+                    updated_at: '2026-11-20T00:00:00Z'
+                  - id: 60000000-0000-4000-8000-000000000001
+                    name: Pratos e sopas
+                    food_count: 238
+                    created_at: '2026-11-20T00:00:00Z'
+                    updated_at: '2026-11-20T00:00:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /v1/admin/food-categories:
+    post:
+      tags: [Food catalogue]
+      operationId: createFoodCategory
+      summary: Create a food category
+      description: Platform admins only. List them with `GET /v1/food-categories`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FoodCategoryInput'
+            example:
+              name: Doces regionais
+      responses:
+        '201':
+          description: Category created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodCategory'
+              example:
+                id: 60000000-0000-4000-8000-000000000009
+                name: Doces regionais
+                food_count: 0
+                created_at: '2026-10-16T14:00:00Z'
+                updated_at: '2026-10-16T14:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/CategoryNameTaken'
+
+  /v1/admin/food-categories/{category_id}:
+    patch:
+      tags: [Food catalogue]
+      operationId: renameFoodCategory
+      summary: Rename a food category
+      parameters:
+        - $ref: '#/components/parameters/CategoryId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FoodCategoryInput'
+            example:
+              name: Doces conventuais
+      responses:
+        '200':
+          description: The category after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodCategory'
+              example:
+                id: 60000000-0000-4000-8000-000000000009
+                name: Doces conventuais
+                food_count: 0
+                created_at: '2026-10-16T14:00:00Z'
+                updated_at: '2026-10-16T14:05:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/CategoryNameTaken'
+    delete:
+      tags: [Food catalogue]
+      operationId: deleteFoodCategory
+      summary: Delete a food category
+      description: Its foods stay in the catalogue, without a category.
+      parameters:
+        - $ref: '#/components/parameters/CategoryId'
+      responses:
+        '204':
+          description: Category deleted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/foods:
+    get:
+      tags: [Food catalogue]
+      operationId: listFoodsForReview
+      summary: List foods for review
+      description: |
+        For the review queue: the most used foods come first. Platform admins
+        and nutrition professionals.
+      parameters:
+        - name: verified
+          in: query
+          description: '`false` for the foods waiting for review.'
+          schema:
+            type: boolean
+        - name: q
+          in: query
+          description: Only foods whose name matches, as in the search.
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 100
+        - $ref: '#/components/parameters/ListLimit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of foods.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminFoodPage'
+              example:
+                items:
+                  - usage_count: 3
+                    food:
+                      id: 61000000-0000-4000-8000-000000000009
+                      food_name: Broa de milho da avó
+                      brand: null
+                      food_type: generic
+                      data_source: user_custom
+                      category:
+                        id: 60000000-0000-4000-8000-000000000002
+                        name: Pão, cereais e bolos
+                      barcode_ean: null
+                      is_verified: false
+                      is_own: false
+                      source_attribution: null
+                      servings:
+                        - id: 62000000-0000-4000-8000-000000000009
+                          serving_description: 1 fatia (50 g)
+                          metric_amount: 50
+                          metric_unit: g
+                          carbs_g: 24
+                          fiber_g: 2.1
+                          sugars_g: 0
+                          calories_kcal: 120
+                          protein_g: 0
+                          fat_g: 0
+                          saturated_fat_g: 0
+                          sodium_mg: 0
+                      components: []
+                      created_at: '2026-10-16T13:10:00Z'
+                      updated_at: '2026-10-16T13:10:00Z'
+                next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Food catalogue]
+      operationId: adminCreateFood
+      summary: Add a food to the catalogue
+      description: |
+        Platform admins only. The food is verified at once, with `data_source`
+        `portuguese_traditional`. A `composite_dish` gets its servings from its
+        ingredients (`POST /v1/admin/foods/{food_id}/components`), so it can be
+        created without servings.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminFoodCreate'
+            example:
+              food_name: Arroz de pato à moda de Braga
+              food_type: composite_dish
+              category_id: 60000000-0000-4000-8000-000000000001
+      responses:
+        '201':
+          description: Food created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Food'
+              example:
+                id: 61000000-0000-4000-8000-000000000002
+                food_name: Arroz de pato à moda de Braga
+                brand: null
+                food_type: composite_dish
+                data_source: portuguese_traditional
+                category:
+                  id: 60000000-0000-4000-8000-000000000001
+                  name: Pratos e sopas
+                barcode_ean: null
+                is_verified: true
+                is_own: false
+                source_attribution: null
+                servings: []
+                components: []
+                created_at: '2026-10-10T10:00:00Z'
+                updated_at: '2026-10-10T10:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Another food already has this barcode.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: barcode_in_use
+                message: Another food already has barcode 5601234567890.
+                details: []
+
+  /v1/admin/foods/{food_id}:
+    patch:
+      tags: [Food catalogue]
+      operationId: adminUpdateFood
+      summary: Correct a food
+      description: Platform admins and nutrition professionals. Meals already logged keep their values.
+      parameters:
+        - $ref: '#/components/parameters/FoodId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminFoodUpdate'
+            example:
+              food_name: Broa de milho caseira
+      responses:
+        '200':
+          description: The food after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Food'
+              example:
+                id: 61000000-0000-4000-8000-000000000009
+                food_name: Broa de milho caseira
+                brand: null
+                food_type: generic
+                data_source: user_custom
+                category:
+                  id: 60000000-0000-4000-8000-000000000002
+                  name: Pão, cereais e bolos
+                barcode_ean: null
+                is_verified: false
+                is_own: false
+                source_attribution: null
+                servings:
+                  - id: 62000000-0000-4000-8000-000000000009
+                    serving_description: 1 fatia (50 g)
+                    metric_amount: 50
+                    metric_unit: g
+                    carbs_g: 24
+                    fiber_g: 2.1
+                    sugars_g: 0
+                    calories_kcal: 120
+                    protein_g: 0
+                    fat_g: 0
+                    saturated_fat_g: 0
+                    sodium_mg: 0
+                components: []
+                created_at: '2026-10-16T13:10:00Z'
+                updated_at: '2026-10-17T09:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Another food already has this barcode.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: barcode_in_use
+                message: Another food already has barcode 5601234567890.
+                details: []
+    delete:
+      tags: [Food catalogue]
+      operationId: adminDeleteFood
+      summary: Remove a food from the catalogue
+      description: |
+        For duplicates. The food leaves the search, but the meals that used it
+        keep their values. A food that is an ingredient of a dish answers 409
+        `invalid_state`: remove it from the dish first.
+      parameters:
+        - $ref: '#/components/parameters/FoodId'
+      responses:
+        '204':
+          description: Food removed.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+
+  /v1/admin/foods/{food_id}/components:
+    post:
+      tags: [Food catalogue]
+      operationId: addFoodComponent
+      summary: Add an ingredient to a composite dish
+      description: |
+        Platform admins only. The dish must be a `composite_dish` and the
+        ingredient must have a serving measured in grams. After the change, the
+        API recalculates the dish's "1 prato" and "100 g" servings from the
+        ingredients.
+      parameters:
+        - $ref: '#/components/parameters/FoodId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FoodComponentCreate'
+            example:
+              component_food_id: 61000000-0000-4000-8000-000000000004
+              default_quantity_g: 150
+      responses:
+        '201':
+          description: The dish with its ingredients and servings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Food'
+              example:
+                id: 61000000-0000-4000-8000-000000000002
+                food_name: Arroz de pato à moda de Braga
+                brand: null
+                food_type: composite_dish
+                data_source: portuguese_traditional
+                category:
+                  id: 60000000-0000-4000-8000-000000000001
+                  name: Pratos e sopas
+                barcode_ean: null
+                is_verified: true
+                is_own: false
+                source_attribution: null
+                servings:
+                  - id: 62000000-0000-4000-8000-000000000003
+                    serving_description: 1 prato (350 g)
+                    metric_amount: 350
+                    metric_unit: g
+                    carbs_g: 61.6
+                    fiber_g: 1.8
+                    sugars_g: 1.4
+                    calories_kcal: 598
+                    protein_g: 31.5
+                    fat_g: 27.3
+                    saturated_fat_g: 8.1
+                    sodium_mg: 910
+                components:
+                  - id: 6a000000-0000-4000-8000-000000000001
+                    component_food_id: 61000000-0000-4000-8000-000000000003
+                    food_name: Arroz carolino cozido
+                    default_quantity_g: 200
+                  - id: 6a000000-0000-4000-8000-000000000002
+                    component_food_id: 61000000-0000-4000-8000-000000000004
+                    food_name: Pato assado, carne
+                    default_quantity_g: 150
+                created_at: '2026-10-10T10:00:00Z'
+                updated_at: '2026-10-10T10:05:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The ingredient is already part of the dish.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: component_exists
+                message: This ingredient is already part of the dish.
+                details: []
+
+  /v1/admin/foods/{food_id}/components/{component_id}:
+    delete:
+      tags: [Food catalogue]
+      operationId: removeFoodComponent
+      summary: Remove an ingredient from a composite dish
+      description: Platform admins only. The dish's servings are recalculated.
+      parameters:
+        - $ref: '#/components/parameters/FoodId'
+        - $ref: '#/components/parameters/ComponentId'
+      responses:
+        '200':
+          description: The dish after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Food'
+              example:
+                id: 61000000-0000-4000-8000-000000000002
+                food_name: Arroz de pato à moda de Braga
+                brand: null
+                food_type: composite_dish
+                data_source: portuguese_traditional
+                category:
+                  id: 60000000-0000-4000-8000-000000000001
+                  name: Pratos e sopas
+                barcode_ean: null
+                is_verified: true
+                is_own: false
+                source_attribution: null
+                servings:
+                  - id: 62000000-0000-4000-8000-000000000003
+                    serving_description: 1 prato (200 g)
+                    metric_amount: 200
+                    metric_unit: g
+                    carbs_g: 56.2
+                    fiber_g: 0.6
+                    sugars_g: 0.2
+                    calories_kcal: 260
+                    protein_g: 5
+                    fat_g: 0.6
+                    saturated_fat_g: 0.2
+                    sodium_mg: 2
+                components:
+                  - id: 6a000000-0000-4000-8000-000000000001
+                    component_food_id: 61000000-0000-4000-8000-000000000003
+                    food_name: Arroz carolino cozido
+                    default_quantity_g: 200
+                created_at: '2026-10-10T10:00:00Z'
+                updated_at: '2026-10-10T10:10:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/foods/{food_id}/servings:
+    post:
+      tags: [Food catalogue]
+      operationId: addFoodServing
+      summary: Add a serving to a food
+      description: Platform admins and nutrition professionals. The description must be unique within the food.
+      parameters:
+        - $ref: '#/components/parameters/FoodId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServingInput'
+            example:
+              serving_description: 1 tigela (250 g)
+              metric_amount: 250
+              metric_unit: g
+              carbs_g: 13.25
+              calories_kcal: 107.5
+              fiber_g: 2
+              sugars_g: 1.75
+              protein_g: 3.25
+              fat_g: 4.25
+              saturated_fat_g: 0.75
+              sodium_mg: 650
+      responses:
+        '201':
+          description: Serving added.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodServing'
+              example:
+                id: 62000000-0000-4000-8000-000000000010
+                serving_description: 1 tigela (250 g)
+                metric_amount: 250
+                metric_unit: g
+                carbs_g: 13.25
+                fiber_g: 2
+                sugars_g: 1.75
+                calories_kcal: 107.5
+                protein_g: 3.25
+                fat_g: 4.25
+                saturated_fat_g: 0.75
+                sodium_mg: 650
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+
+  /v1/admin/foods/{food_id}/servings/{serving_id}:
+    patch:
+      tags: [Food catalogue]
+      operationId: updateFoodServing
+      summary: Correct a serving
+      description: Meals already logged keep the values they were logged with.
+      parameters:
+        - $ref: '#/components/parameters/FoodId'
+        - $ref: '#/components/parameters/ServingId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServingUpdate'
+            example:
+              carbs_g: 14
+      responses:
+        '200':
+          description: The serving after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodServing'
+              example:
+                id: 62000000-0000-4000-8000-000000000010
+                serving_description: 1 tigela (250 g)
+                metric_amount: 250
+                metric_unit: g
+                carbs_g: 14
+                fiber_g: 2
+                sugars_g: 1.75
+                calories_kcal: 107.5
+                protein_g: 3.25
+                fat_g: 4.25
+                saturated_fat_g: 0.75
+                sodium_mg: 650
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+    delete:
+      tags: [Food catalogue]
+      operationId: deleteFoodServing
+      summary: Remove a serving
+      description: The serving leaves the catalogue; meals that used it keep it in their history.
+      parameters:
+        - $ref: '#/components/parameters/FoodId'
+        - $ref: '#/components/parameters/ServingId'
+      responses:
+        '204':
+          description: Serving removed.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/foods/{food_id}/verify:
+    post:
+      tags: [Food catalogue]
+      operationId: verifyFood
+      summary: Mark a food as verified
+      description: |
+        Platform admins and nutrition professionals. A verified food is visible
+        to everyone and comes first in the search.
+      parameters:
+        - $ref: '#/components/parameters/FoodId'
+      responses:
+        '200':
+          description: The food after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Food'
+              example:
+                id: 61000000-0000-4000-8000-000000000009
+                food_name: Broa de milho caseira
+                brand: null
+                food_type: generic
+                data_source: user_custom
+                category:
+                  id: 60000000-0000-4000-8000-000000000002
+                  name: Pão, cereais e bolos
+                barcode_ean: null
+                is_verified: true
+                is_own: false
+                source_attribution: null
+                servings:
+                  - id: 62000000-0000-4000-8000-000000000009
+                    serving_description: 1 fatia (50 g)
+                    metric_amount: 50
+                    metric_unit: g
+                    carbs_g: 24
+                    fiber_g: 2.1
+                    sugars_g: 0
+                    calories_kcal: 120
+                    protein_g: 0
+                    fat_g: 0
+                    saturated_fat_g: 0
+                    sodium_mg: 0
+                components: []
+                created_at: '2026-10-16T13:10:00Z'
+                updated_at: '2026-10-17T09:05:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/me/meals:
+    get:
+      tags: [Meals]
+      operationId: listMeals
+      summary: List the meals of a day or a range of days
+      description: |
+        Send `date` for the Diário of one day, or `from_date` and `to_date` for a
+        chart (at most 90 days). Days are calendar days in Portugal. Meals come
+        by day, then by meal type, then by time, with their items, photos,
+        linked insulin doses and the impact on glucose.
+      parameters:
+        - name: date
+          in: query
+          description: One day.
+          schema:
+            type: string
+            format: date
+          example: '2026-10-16'
+        - name: from_date
+          in: query
+          description: First day of the range, inclusive.
+          schema:
+            type: string
+            format: date
+        - name: to_date
+          in: query
+          description: Last day of the range, inclusive.
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: The meals.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MealList'
+              example:
+                items:
+                  - id: 63000000-0000-4000-8000-000000000001
+                    meal_type: lunch
+                    meal_date: '2026-10-16'
+                    planned_time: null
+                    status: eaten
+                    eaten_at: '2026-10-16T12:40:00Z'
+                    total_carbs_g: 36.65
+                    total_calories_kcal: 539
+                    postprandial_delta_mg_dl: 48
+                    notes: null
+                    idempotency_key: 3a9c5e1f-2b4d-4c6e-8f0a-1b2c3d4e5f60
+                    items:
+                      - id: 64000000-0000-4000-8000-000000000001
+                        food_id: 61000000-0000-4000-8000-000000000001
+                        food_name: Sopa, caldo verde
+                        serving_id: 62000000-0000-4000-8000-000000000002
+                        serving_description: 1 prato (300 g)
+                        serving_quantity: 1
+                        carbs_g: 15.9
+                        calories_kcal: 129
+                        is_eaten: true
+                        created_at: '2026-10-16T12:41:00Z'
+                      - id: 64000000-0000-4000-8000-000000000002
+                        food_id: 61000000-0000-4000-8000-000000000006
+                        food_name: Bacalhau à Brás
+                        serving_id: 62000000-0000-4000-8000-000000000007
+                        serving_description: 1 prato (250 g)
+                        serving_quantity: 1
+                        carbs_g: 20.75
+                        calories_kcal: 410
+                        is_eaten: true
+                        created_at: '2026-10-16T12:41:00Z'
+                    photos: []
+                    insulin_logs:
+                      - id: 66000000-0000-4000-8000-000000000001
+                        insulin_type: rapid_bolus
+                        insulin_brand: NovoRapid
+                        dose_units: 4
+                        administered_at: '2026-10-16T12:35:00Z'
+                        reason: meal
+                        meal_id: 63000000-0000-4000-8000-000000000001
+                        notes: null
+                        idempotency_key: 9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a
+                        edited_after_24h: false
+                        created_at: '2026-10-16T12:42:00Z'
+                        updated_at: '2026-10-16T12:42:00Z'
+                    created_at: '2026-10-16T12:41:00Z'
+                    updated_at: '2026-10-16T14:45:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+    post:
+      tags: [Meals]
+      operationId: createMeal
+      summary: Plan or log a meal
+      description: |
+        - `status: planned` plans a meal for later (`meal_date`, optionally
+          `planned_time`). Confirm it later with `POST /v1/me/meals/{meal_id}/eaten`.
+        - `status: eaten` logs a meal that was eaten at `eaten_at` (by default,
+          now). `meal_date` defaults to that day.
+
+        Each item is a serving of a food and a quantity. The API works out the
+        carbohydrates and calories of each item from the catalogue and keeps
+        them, so later changes to the catalogue do not change past meals. A
+        meal without items can carry only `total_carbs_g` (and
+        `total_calories_kcal`), for a food that is not in the catalogue.
+
+        Sending an `idempotency_key` that is already stored returns that meal
+        (200) and changes nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MealCreate'
+            example:
+              idempotency_key: 3a9c5e1f-2b4d-4c6e-8f0a-1b2c3d4e5f60
+              meal_type: lunch
+              status: eaten
+              eaten_at: '2026-10-16T12:40:00Z'
+              items:
+                - serving_id: 62000000-0000-4000-8000-000000000002
+                  serving_quantity: 1
+                - serving_id: 62000000-0000-4000-8000-000000000007
+                  serving_quantity: 1
+      responses:
+        '200':
+          description: A meal with this `idempotency_key` was already stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meal'
+              example:
+                id: 63000000-0000-4000-8000-000000000001
+                meal_type: lunch
+                meal_date: '2026-10-16'
+                planned_time: null
+                status: eaten
+                eaten_at: '2026-10-16T12:40:00Z'
+                total_carbs_g: 36.65
+                total_calories_kcal: 539
+                postprandial_delta_mg_dl: null
+                notes: null
+                idempotency_key: 3a9c5e1f-2b4d-4c6e-8f0a-1b2c3d4e5f60
+                items:
+                  - id: 64000000-0000-4000-8000-000000000001
+                    food_id: 61000000-0000-4000-8000-000000000001
+                    food_name: Sopa, caldo verde
+                    serving_id: 62000000-0000-4000-8000-000000000002
+                    serving_description: 1 prato (300 g)
+                    serving_quantity: 1
+                    carbs_g: 15.9
+                    calories_kcal: 129
+                    is_eaten: true
+                    created_at: '2026-10-16T12:41:00Z'
+                  - id: 64000000-0000-4000-8000-000000000002
+                    food_id: 61000000-0000-4000-8000-000000000006
+                    food_name: Bacalhau à Brás
+                    serving_id: 62000000-0000-4000-8000-000000000007
+                    serving_description: 1 prato (250 g)
+                    serving_quantity: 1
+                    carbs_g: 20.75
+                    calories_kcal: 410
+                    is_eaten: true
+                    created_at: '2026-10-16T12:41:00Z'
+                photos: []
+                insulin_logs: []
+                created_at: '2026-10-16T12:41:00Z'
+                updated_at: '2026-10-16T12:41:00Z'
+        '201':
+          description: Meal stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meal'
+              example:
+                id: 63000000-0000-4000-8000-000000000001
+                meal_type: lunch
+                meal_date: '2026-10-16'
+                planned_time: null
+                status: eaten
+                eaten_at: '2026-10-16T12:40:00Z'
+                total_carbs_g: 36.65
+                total_calories_kcal: 539
+                postprandial_delta_mg_dl: null
+                notes: null
+                idempotency_key: 3a9c5e1f-2b4d-4c6e-8f0a-1b2c3d4e5f60
+                items:
+                  - id: 64000000-0000-4000-8000-000000000001
+                    food_id: 61000000-0000-4000-8000-000000000001
+                    food_name: Sopa, caldo verde
+                    serving_id: 62000000-0000-4000-8000-000000000002
+                    serving_description: 1 prato (300 g)
+                    serving_quantity: 1
+                    carbs_g: 15.9
+                    calories_kcal: 129
+                    is_eaten: true
+                    created_at: '2026-10-16T12:41:00Z'
+                  - id: 64000000-0000-4000-8000-000000000002
+                    food_id: 61000000-0000-4000-8000-000000000006
+                    food_name: Bacalhau à Brás
+                    serving_id: 62000000-0000-4000-8000-000000000007
+                    serving_description: 1 prato (250 g)
+                    serving_quantity: 1
+                    carbs_g: 20.75
+                    calories_kcal: 410
+                    is_eaten: true
+                    created_at: '2026-10-16T12:41:00Z'
+                photos: []
+                insulin_logs: []
+                created_at: '2026-10-16T12:41:00Z'
+                updated_at: '2026-10-16T12:41:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/meals/{meal_id}:
+    get:
+      tags: [Meals]
+      operationId: getMeal
+      summary: Get a meal
+      parameters:
+        - $ref: '#/components/parameters/MealId'
+      responses:
+        '200':
+          description: The meal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meal'
+              example:
+                id: 63000000-0000-4000-8000-000000000003
+                meal_type: dinner
+                meal_date: '2026-10-16'
+                planned_time: '20:00'
+                status: planned
+                eaten_at: null
+                total_carbs_g: 45
+                total_calories_kcal: 0
+                postprandial_delta_mg_dl: null
+                notes: Jantar de aniversário
+                idempotency_key: null
+                items: []
+                photos: []
+                insulin_logs: []
+                created_at: '2026-10-16T15:00:00Z'
+                updated_at: '2026-10-16T15:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Meals]
+      operationId: updateMeal
+      summary: Change a meal's details
+      description: |
+        Changes the type, the day, the times or the notes. The totals can only be
+        set by hand on a meal without items; otherwise they come from the items
+        (`PUT /v1/me/meals/{meal_id}/items`). `eaten_at` can only change on an
+        eaten meal.
+      parameters:
+        - $ref: '#/components/parameters/MealId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MealUpdate'
+            example:
+              planned_time: '20:30'
+      responses:
+        '200':
+          description: The meal after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meal'
+              example:
+                id: 63000000-0000-4000-8000-000000000003
+                meal_type: dinner
+                meal_date: '2026-10-16'
+                planned_time: '20:30'
+                status: planned
+                eaten_at: null
+                total_carbs_g: 45
+                total_calories_kcal: 0
+                postprandial_delta_mg_dl: null
+                notes: Jantar de aniversário
+                idempotency_key: null
+                items: []
+                photos: []
+                insulin_logs: []
+                created_at: '2026-10-16T15:00:00Z'
+                updated_at: '2026-10-16T15:10:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+    delete:
+      tags: [Meals]
+      operationId: deleteMeal
+      summary: Delete a meal
+      description: |
+        The meal, its items and its photos leave the Diário and the charts.
+        Insulin doses linked to it stay in the history, without the meal.
+      parameters:
+        - $ref: '#/components/parameters/MealId'
+      responses:
+        '204':
+          description: Meal deleted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/me/meals/{meal_id}/items:
+    put:
+      tags: [Meals]
+      operationId: replaceMealItems
+      summary: Change the items of a meal
+      description: |
+        Sends the full list of items. An item with `id` keeps that item and
+        updates its serving, quantity or `is_eaten`; an item without `id` is
+        added; items left out are removed. The totals count only the items with
+        `is_eaten: true`.
+      parameters:
+        - $ref: '#/components/parameters/MealId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MealItemsReplace'
+            example:
+              items:
+                - id: 64000000-0000-4000-8000-000000000001
+                  serving_id: 62000000-0000-4000-8000-000000000002
+                  serving_quantity: 1
+                - id: 64000000-0000-4000-8000-000000000002
+                  serving_id: 62000000-0000-4000-8000-000000000007
+                  serving_quantity: 0.5
+      responses:
+        '200':
+          description: The meal with the new items and totals.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meal'
+              example:
+                id: 63000000-0000-4000-8000-000000000001
+                meal_type: lunch
+                meal_date: '2026-10-16'
+                planned_time: null
+                status: eaten
+                eaten_at: '2026-10-16T12:40:00Z'
+                total_carbs_g: 26.28
+                total_calories_kcal: 334
+                postprandial_delta_mg_dl: 48
+                notes: null
+                idempotency_key: 3a9c5e1f-2b4d-4c6e-8f0a-1b2c3d4e5f60
+                items:
+                  - id: 64000000-0000-4000-8000-000000000001
+                    food_id: 61000000-0000-4000-8000-000000000001
+                    food_name: Sopa, caldo verde
+                    serving_id: 62000000-0000-4000-8000-000000000002
+                    serving_description: 1 prato (300 g)
+                    serving_quantity: 1
+                    carbs_g: 15.9
+                    calories_kcal: 129
+                    is_eaten: true
+                    created_at: '2026-10-16T12:41:00Z'
+                  - id: 64000000-0000-4000-8000-000000000002
+                    food_id: 61000000-0000-4000-8000-000000000006
+                    food_name: Bacalhau à Brás
+                    serving_id: 62000000-0000-4000-8000-000000000007
+                    serving_description: 1 prato (250 g)
+                    serving_quantity: 0.5
+                    carbs_g: 10.38
+                    calories_kcal: 205
+                    is_eaten: true
+                    created_at: '2026-10-16T12:41:00Z'
+                photos: []
+                insulin_logs: []
+                created_at: '2026-10-16T12:41:00Z'
+                updated_at: '2026-10-16T13:30:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+
+  /v1/me/meals/{meal_id}/eaten:
+    post:
+      tags: [Meals]
+      operationId: markMealEaten
+      summary: Confirm that a planned meal was eaten
+      description: A cancelled meal answers 409 `invalid_state`. Confirming an eaten meal again returns it unchanged.
+      parameters:
+        - $ref: '#/components/parameters/MealId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MealEaten'
+            example:
+              eaten_at: '2026-10-16T20:35:00Z'
+      responses:
+        '200':
+          description: The meal after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meal'
+              example:
+                id: 63000000-0000-4000-8000-000000000003
+                meal_type: dinner
+                meal_date: '2026-10-16'
+                planned_time: '20:30'
+                status: eaten
+                eaten_at: '2026-10-16T20:35:00Z'
+                total_carbs_g: 45
+                total_calories_kcal: 0
+                postprandial_delta_mg_dl: null
+                notes: Jantar de aniversário
+                idempotency_key: null
+                items: []
+                photos: []
+                insulin_logs: []
+                created_at: '2026-10-16T15:00:00Z'
+                updated_at: '2026-10-16T20:36:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+
+  /v1/me/meals/{meal_id}/cancel:
+    post:
+      tags: [Meals]
+      operationId: cancelMeal
+      summary: Cancel a planned meal
+      description: Only planned meals can be cancelled. An eaten meal answers 409 `invalid_state`; delete it instead.
+      parameters:
+        - $ref: '#/components/parameters/MealId'
+      responses:
+        '200':
+          description: The meal after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meal'
+              example:
+                id: 63000000-0000-4000-8000-000000000003
+                meal_type: dinner
+                meal_date: '2026-10-16'
+                planned_time: '20:30'
+                status: cancelled
+                eaten_at: null
+                total_carbs_g: 45
+                total_calories_kcal: 0
+                postprandial_delta_mg_dl: null
+                notes: Jantar de aniversário
+                idempotency_key: null
+                items: []
+                photos: []
+                insulin_logs: []
+                created_at: '2026-10-16T15:00:00Z'
+                updated_at: '2026-10-16T19:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+
+  /v1/me/meals/{meal_id}/photos:
+    post:
+      tags: [Meals]
+      operationId: uploadMealPhoto
+      summary: Add a photo of the meal for analysis
+      description: |
+        Needs the `external_ai_processing` consent; without it the API answers
+        403 `consent_required`. Remove the EXIF data (location, date, phone) and
+        shrink the image to at most 1600 px before sending it: JPEG, PNG or
+        WebP, up to 5 MB.
+
+        The API answers 202 at once. An AI model then estimates the foods,
+        weights, carbohydrates and calories, usually within a few seconds. A
+        push (`type` `meal_photo_analyzed`) says when it is done, or poll
+        `GET /v1/me/meals/{meal_id}/photos/{photo_id}`. The estimate is only a
+        proposal: nothing counts until the patient confirms it. A second photo
+        of the same meal (a second helping) adds to the first.
+      parameters:
+        - $ref: '#/components/parameters/MealId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/MealPhotoUpload'
+      responses:
+        '202':
+          description: Photo stored; the analysis is running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MealPhoto'
+              example:
+                id: 65000000-0000-4000-8000-000000000001
+                meal_id: 63000000-0000-4000-8000-000000000002
+                analysis_status: pending
+                image_url: https://voltik-cgm-staging.duckdns.org/v1/files/69000000-0000-4000-8000-000000000001?expires=1760620500&signature=4e1b9a0c7d2f
+                image_url_expires_at: '2026-10-16T13:15:00Z'
+                estimated_weight_g: null
+                estimated_carbs_g: null
+                estimated_calories_kcal: null
+                confidence_percent: null
+                low_confidence: false
+                proposed_items: []
+                analyzed_at: null
+                confirmed_at: null
+                created_at: '2026-10-16T13:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/ConsentRequired'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          description: The photo is larger than 5 MB.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: payload_too_large
+                message: The photo must be at most 5 MB.
+                details: []
+        '415':
+          description: The file is not a JPEG, PNG or WebP image.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: unsupported_media_type
+                message: Send a JPEG, PNG or WebP image.
+                details: []
+
+  /v1/me/meals/{meal_id}/photos/{photo_id}:
+    get:
+      tags: [Meals]
+      operationId: getMealPhoto
+      summary: Get a meal photo and its analysis
+      parameters:
+        - $ref: '#/components/parameters/MealId'
+        - $ref: '#/components/parameters/PhotoId'
+      responses:
+        '200':
+          description: The photo, with the estimate when the analysis is done.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MealPhoto'
+              example:
+                id: 65000000-0000-4000-8000-000000000001
+                meal_id: 63000000-0000-4000-8000-000000000002
+                analysis_status: completed
+                image_url: https://voltik-cgm-staging.duckdns.org/v1/files/69000000-0000-4000-8000-000000000001?expires=1760620520&signature=9a7f3c2e1b0d
+                image_url_expires_at: '2026-10-16T13:15:20Z'
+                estimated_weight_g: 420
+                estimated_carbs_g: 27.3
+                estimated_calories_kcal: 1046
+                confidence_percent: 72
+                low_confidence: false
+                proposed_items:
+                  - name: Francesinha
+                    estimated_weight_g: 420
+                    estimated_carbs_g: 27.3
+                    estimated_calories_kcal: 1046
+                    food_id: 61000000-0000-4000-8000-000000000007
+                    serving_id: 62000000-0000-4000-8000-000000000011
+                    serving_quantity: 4.2
+                analyzed_at: '2026-10-16T13:00:09Z'
+                confirmed_at: null
+                created_at: '2026-10-16T13:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/me/meals/{meal_id}/photos/{photo_id}/confirm:
+    post:
+      tags: [Meals]
+      operationId: confirmMealPhoto
+      summary: Confirm or correct the estimate of a photo
+      description: |
+        Sends the items the patient accepted, after adjusting quantities or
+        swapping foods. They are added to the meal and the totals are
+        recalculated. An empty list rejects the proposal: the photo stays with
+        the meal without items. A photo can be confirmed once; before the
+        analysis ends the API answers 409 `analysis_not_ready`.
+      parameters:
+        - $ref: '#/components/parameters/MealId'
+        - $ref: '#/components/parameters/PhotoId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MealPhotoConfirmation'
+            example:
+              items:
+                - serving_id: 62000000-0000-4000-8000-000000000011
+                  serving_quantity: 3.8
+      responses:
+        '200':
+          description: The meal with the confirmed items.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meal'
+              example:
+                id: 63000000-0000-4000-8000-000000000002
+                meal_type: dinner
+                meal_date: '2026-10-15'
+                planned_time: null
+                status: eaten
+                eaten_at: '2026-10-15T20:10:00Z'
+                total_carbs_g: 24.7
+                total_calories_kcal: 946.2
+                postprandial_delta_mg_dl: null
+                notes: null
+                idempotency_key: 5b7d9f1a-3c5e-4a7b-9d1f-3a5c7e9b1d3f
+                items:
+                  - id: 64000000-0000-4000-8000-000000000003
+                    food_id: 61000000-0000-4000-8000-000000000007
+                    food_name: Francesinha, com molho
+                    serving_id: 62000000-0000-4000-8000-000000000011
+                    serving_description: 100 g
+                    serving_quantity: 3.8
+                    carbs_g: 24.7
+                    calories_kcal: 946.2
+                    is_eaten: true
+                    created_at: '2026-10-15T20:12:00Z'
+                photos:
+                  - id: 65000000-0000-4000-8000-000000000001
+                    meal_id: 63000000-0000-4000-8000-000000000002
+                    analysis_status: completed
+                    image_url: https://voltik-cgm-staging.duckdns.org/v1/files/69000000-0000-4000-8000-000000000001?expires=1760620600&signature=1c3e5a7b9d0f
+                    image_url_expires_at: '2026-10-15T20:27:00Z'
+                    estimated_weight_g: 420
+                    estimated_carbs_g: 27.3
+                    estimated_calories_kcal: 1046
+                    confidence_percent: 72
+                    low_confidence: false
+                    proposed_items:
+                      - name: Francesinha
+                        estimated_weight_g: 420
+                        estimated_carbs_g: 27.3
+                        estimated_calories_kcal: 1046
+                        food_id: 61000000-0000-4000-8000-000000000007
+                        serving_id: 62000000-0000-4000-8000-000000000011
+                        serving_quantity: 4.2
+                    analyzed_at: '2026-10-15T20:11:09Z'
+                    confirmed_at: '2026-10-15T20:12:00Z'
+                    created_at: '2026-10-15T20:11:00Z'
+                insulin_logs: []
+                created_at: '2026-10-15T20:11:00Z'
+                updated_at: '2026-10-15T20:12:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The analysis has not finished, or the photo was already confirmed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                analysis_not_ready:
+                  summary: Analysis still running
+                  value:
+                    code: analysis_not_ready
+                    message: The analysis of this photo has not finished.
+                    details: []
+                invalid_state:
+                  summary: Already confirmed
+                  value:
+                    code: invalid_state
+                    message: This photo was already confirmed.
+                    details: []
+
+  /v1/me/insulin-logs:
+    get:
+      tags: [Insulin]
+      operationId: listInsulinLogs
+      summary: List insulin doses in a time range
+      description: |
+        Doses with `from <= administered_at < to`, oldest first, with the daily
+        totals per insulin type (days in Portugal). The range can be at most 90
+        days.
+      parameters:
+        - $ref: '#/components/parameters/RangeFrom'
+        - $ref: '#/components/parameters/RangeTo'
+      responses:
+        '200':
+          description: The doses and the daily totals.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsulinLogList'
+              example:
+                items:
+                  - id: 66000000-0000-4000-8000-000000000002
+                    insulin_type: basal
+                    insulin_brand: Toujeo
+                    dose_units: 18
+                    administered_at: '2026-10-16T07:00:00Z'
+                    reason: scheduled_basal
+                    meal_id: null
+                    notes: null
+                    idempotency_key: 1e2d3c4b-5a69-4788-9a0b-c1d2e3f4a5b6
+                    edited_after_24h: false
+                    created_at: '2026-10-16T07:01:00Z'
+                    updated_at: '2026-10-16T07:01:00Z'
+                  - id: 66000000-0000-4000-8000-000000000001
+                    insulin_type: rapid_bolus
+                    insulin_brand: NovoRapid
+                    dose_units: 4
+                    administered_at: '2026-10-16T12:35:00Z'
+                    reason: meal
+                    meal_id: 63000000-0000-4000-8000-000000000001
+                    notes: null
+                    idempotency_key: 9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a
+                    edited_after_24h: false
+                    created_at: '2026-10-16T12:42:00Z'
+                    updated_at: '2026-10-16T12:42:00Z'
+                daily_totals:
+                  - date: '2026-10-16'
+                    insulin_type: basal
+                    total_units: 18
+                    doses: 1
+                  - date: '2026-10-16'
+                    insulin_type: rapid_bolus
+                    total_units: 4
+                    doses: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+    post:
+      tags: [Insulin]
+      operationId: createInsulinLog
+      summary: Log an insulin dose
+      description: |
+        Records a dose the patient has already taken. Voltik never calculates or
+        suggests doses. `meal_id` links the dose to one of the patient's meals.
+        Sending an `idempotency_key` that is already stored returns that dose
+        (200): a dose sent twice is never stored twice. Ask for confirmation in
+        the app before sending more than 30 units.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InsulinLogCreate'
+            example:
+              idempotency_key: 9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a
+              insulin_type: rapid_bolus
+              insulin_brand: NovoRapid
+              dose_units: 4
+              administered_at: '2026-10-16T12:35:00Z'
+              reason: meal
+              meal_id: 63000000-0000-4000-8000-000000000001
+      responses:
+        '200':
+          description: A dose with this `idempotency_key` was already stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsulinLog'
+              example:
+                id: 66000000-0000-4000-8000-000000000001
+                insulin_type: rapid_bolus
+                insulin_brand: NovoRapid
+                dose_units: 4
+                administered_at: '2026-10-16T12:35:00Z'
+                reason: meal
+                meal_id: 63000000-0000-4000-8000-000000000001
+                notes: null
+                idempotency_key: 9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a
+                edited_after_24h: false
+                created_at: '2026-10-16T12:42:00Z'
+                updated_at: '2026-10-16T12:42:00Z'
+        '201':
+          description: Dose stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsulinLog'
+              example:
+                id: 66000000-0000-4000-8000-000000000001
+                insulin_type: rapid_bolus
+                insulin_brand: NovoRapid
+                dose_units: 4
+                administered_at: '2026-10-16T12:35:00Z'
+                reason: meal
+                meal_id: 63000000-0000-4000-8000-000000000001
+                notes: null
+                idempotency_key: 9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a
+                edited_after_24h: false
+                created_at: '2026-10-16T12:42:00Z'
+                updated_at: '2026-10-16T12:42:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/insulin-logs/{insulin_log_id}:
+    patch:
+      tags: [Insulin]
+      operationId: updateInsulinLog
+      summary: Correct an insulin dose
+      description: |
+        Same rules as when logging. A correction made more than 24 hours after
+        the dose is flagged (`edited_after_24h`) and shown in clinical reports.
+      parameters:
+        - $ref: '#/components/parameters/InsulinLogId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InsulinLogUpdate'
+            example:
+              dose_units: 5
+      responses:
+        '200':
+          description: The dose after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsulinLog'
+              example:
+                id: 66000000-0000-4000-8000-000000000001
+                insulin_type: rapid_bolus
+                insulin_brand: NovoRapid
+                dose_units: 5
+                administered_at: '2026-10-16T12:35:00Z'
+                reason: meal
+                meal_id: 63000000-0000-4000-8000-000000000001
+                notes: null
+                idempotency_key: 9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a
+                edited_after_24h: false
+                created_at: '2026-10-16T12:42:00Z'
+                updated_at: '2026-10-16T13:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Insulin]
+      operationId: deleteInsulinLog
+      summary: Delete an insulin dose
+      parameters:
+        - $ref: '#/components/parameters/InsulinLogId'
+      responses:
+        '204':
+          description: Dose deleted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/me/stats:
+    get:
+      tags: [Stats]
+      operationId: getGlucoseStats
+      summary: Glucose metrics for a period
+      description: |
+        The metrics of the international consensus on time in range, computed
+        with the patient's current target range (returned in the response):
+
+        - TIR, TBR and TAR: share of readings in, below and above the range.
+        - GMI (estimated HbA1c) = 3.31 + 0.02392 × mean glucose.
+        - An episode is a run of at least 15 minutes below (hypo) or above
+          (hyper) the range.
+        - `coverage_percent`: share of 5-minute slots with a reading. Below 70 %
+          the metrics are not reliable enough for clinical conclusions.
+
+        Without readings the metrics are `null`. The range can be at most 90 days.
+      parameters:
+        - $ref: '#/components/parameters/RangeFrom'
+        - $ref: '#/components/parameters/RangeTo'
+      responses:
+        '200':
+          description: The metrics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlucoseStats'
+              example:
+                from: '2026-10-09T00:00:00Z'
+                to: '2026-10-16T00:00:00Z'
+                target_min_mg_dl: 70
+                target_max_mg_dl: 180
+                readings_count: 1980
+                coverage_percent: 98.2
+                time_in_range_percent: 72.4
+                time_below_range_percent: 3.1
+                time_above_range_percent: 24.5
+                mean_glucose_mg_dl: 152
+                std_dev_mg_dl: 48.6
+                coefficient_of_variation_percent: 32
+                gmi_percent: 6.95
+                hypo_episodes: 2
+                hyper_episodes: 7
+                active_minutes: 210
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+
+  /v1/me/reports:
+    get:
+      tags: [Reports]
+      operationId: listReports
+      summary: List the patient's clinical reports
+      description: Newest first.
+      parameters:
+        - $ref: '#/components/parameters/ListLimit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of reports.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportPage'
+              example:
+                items:
+                  - id: 68000000-0000-4000-8000-000000000001
+                    period_type: week
+                    start_date: '2026-10-09'
+                    end_date: '2026-10-15'
+                    generated_by_role: patient
+                    target_min_mg_dl: 70
+                    target_max_mg_dl: 180
+                    coverage_percent: 98.2
+                    low_coverage: false
+                    time_in_range_percent: 72.4
+                    time_below_range_percent: 3.1
+                    time_above_range_percent: 24.5
+                    mean_glucose_mg_dl: 152
+                    std_dev_mg_dl: 48.6
+                    coefficient_of_variation_percent: 32
+                    gmi_percent: 6.95
+                    hypo_episodes: 2
+                    hyper_episodes: 7
+                    iris_summary: Esta semana passou 72 % do tempo dentro do intervalo alvo, perto da meta de 70 %. As subidas foram mais frequentes ao fim da tarde.
+                    work_impact_analysis: Nos dias de turno da tarde, a glicemia subiu mais depois do almoço. Vale a pena falar disto na próxima consulta.
+                    created_at: '2026-10-16T09:00:00Z'
+                next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+    post:
+      tags: [Reports]
+      operationId: createReport
+      summary: Generate a clinical report
+      description: |
+        Computes the metrics of `GET /v1/me/stats` for whole days (in Portugal)
+        and saves them, so the report can be shared with the doctor. The period
+        can be at most 90 days and cannot end after today.
+
+        With the `external_ai_processing` consent, the report also has a plain
+        summary written by Iris and an analysis of the impact on work (Iris only
+        receives numbers, never who the patient is). Without the consent, or if
+        Iris does not answer, these fields are `null`. A period without readings
+        answers 409 `no_readings`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReportCreate'
+            example:
+              period_type: week
+              start_date: '2026-10-09'
+              end_date: '2026-10-15'
+      responses:
+        '201':
+          description: Report saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClinicalReport'
+              example:
+                id: 68000000-0000-4000-8000-000000000001
+                period_type: week
+                start_date: '2026-10-09'
+                end_date: '2026-10-15'
+                generated_by_role: patient
+                target_min_mg_dl: 70
+                target_max_mg_dl: 180
+                coverage_percent: 98.2
+                low_coverage: false
+                time_in_range_percent: 72.4
+                time_below_range_percent: 3.1
+                time_above_range_percent: 24.5
+                mean_glucose_mg_dl: 152
+                std_dev_mg_dl: 48.6
+                coefficient_of_variation_percent: 32
+                gmi_percent: 6.95
+                hypo_episodes: 2
+                hyper_episodes: 7
+                iris_summary: Esta semana passou 72 % do tempo dentro do intervalo alvo, perto da meta de 70 %. As subidas foram mais frequentes ao fim da tarde.
+                work_impact_analysis: Nos dias de turno da tarde, a glicemia subiu mais depois do almoço. Vale a pena falar disto na próxima consulta.
+                created_at: '2026-10-16T09:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NoPatientProfile'
+        '409':
+          description: The period has no glucose readings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: no_readings
+                message: There are no glucose readings between 2026-10-09 and 2026-10-15.
+                details: []
+
+  /v1/me/reports/{report_id}:
+    get:
+      tags: [Reports]
+      operationId: getReport
+      summary: Get a clinical report
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+      responses:
+        '200':
+          description: The report.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClinicalReport'
+              example:
+                id: 68000000-0000-4000-8000-000000000002
+                period_type: week
+                start_date: '2026-10-05'
+                end_date: '2026-10-11'
+                generated_by_role: system_scheduled
+                target_min_mg_dl: 70
+                target_max_mg_dl: 180
+                coverage_percent: 64.5
+                low_coverage: true
+                time_in_range_percent: 68.1
+                time_below_range_percent: 4.2
+                time_above_range_percent: 27.7
+                mean_glucose_mg_dl: 158
+                std_dev_mg_dl: 52.3
+                coefficient_of_variation_percent: 33.1
+                gmi_percent: 7.09
+                hypo_episodes: 3
+                hyper_episodes: 9
+                iris_summary: null
+                work_impact_analysis: null
+                created_at: '2026-10-12T05:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Reports]
+      operationId: deleteReport
+      summary: Delete a clinical report
+      description: |
+        The report and its PDF leave the list. Messages that attached it show it
+        as deleted. A report generated by a clinician answers 403 `forbidden`:
+        only the clinician can delete it.
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+      responses:
+        '204':
+          description: Report deleted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/reports/{report_id}/pdf:
+    get:
+      tags: [Reports]
+      operationId: exportReportPdf
+      summary: Get a link to the report's PDF
+      description: |
+        Generates the PDF the first time (AGP chart, metrics and summary) and
+        returns a link that works for 15 minutes without the `Authorization`
+        header, for a PDF viewer or a download. The PDF identifies the patient.
+      parameters:
+        - $ref: '#/components/parameters/ReportId'
+      responses:
+        '200':
+          description: A temporary link to the PDF.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileLink'
+              example:
+                url: https://voltik-cgm-staging.duckdns.org/v1/files/69000000-0000-4000-8000-000000000002?expires=1760610300&signature=7b3d1f9e5a2c
+                expires_at: '2026-10-16T09:15:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/files/{file_id}:
+    get:
+      tags: [Files]
+      operationId: downloadFile
+      summary: Download a file through a signed link
+      description: |
+        Meal photos and report PDFs. Use the links the API returns (`image_url`,
+        `GET /v1/reports/{report_id}/pdf`) as they are: `expires` and
+        `signature` prove the link was issued by the API. After 15 minutes the
+        link answers 403 `link_expired`; ask for the resource again to get a new
+        one.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+        - name: expires
+          in: query
+          required: true
+          description: When the link stops working, in seconds since 1970-01-01 UTC.
+          schema:
+            type: integer
+            format: int64
+        - name: signature
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The file.
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '403':
+          description: The link is not valid or has expired.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: link_expired
+                message: This link has expired. Ask for a new one.
+                details: []
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/webhooks/sms:
+    post:
+      tags: [Webhooks]
+      operationId: receiveSmsStatus
+      summary: Delivery receipts from the SMS provider
+      description: |
+        Called by Twilio (status callbacks) for each escalation SMS. The API
+        checks the `X-Twilio-Signature` header and answers 403 when it does not
+        match. Not for the apps.
+      security: []
+      parameters:
+        - name: X-Twilio-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/SmsStatusCallback'
+      responses:
+        '204':
+          description: Receipt recorded.
+        '403':
+          description: The signature does not match.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: forbidden
+                message: Invalid signature.
+                details: []
 
 components:
   securitySchemes:
@@ -1270,6 +4393,107 @@ components:
         format: uuid
     AlertId:
       name: alert_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ReadingId:
+      name: reading_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    DeviceId:
+      name: device_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ActivityId:
+      name: activity_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    FoodId:
+      name: food_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ServingId:
+      name: serving_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ComponentId:
+      name: component_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    CategoryId:
+      name: category_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Barcode:
+      name: ean
+      in: path
+      required: true
+      description: EAN-13, EAN-8 or UPC code, digits only.
+      schema:
+        type: string
+        pattern: '^[0-9]{8,14}$'
+      example: '5601234567890'
+    MealId:
+      name: meal_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PhotoId:
+      name: photo_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    InsulinLogId:
+      name: insulin_log_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ReportId:
+      name: report_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    RecipientId:
+      name: recipient_id
+      in: path
+      required: true
+      description: The notification's row in the alert's `recipients`.
+      schema:
+        type: string
+        format: uuid
+    FileId:
+      name: file_id
       in: path
       required: true
       schema:
@@ -1394,6 +4618,66 @@ components:
           example:
             code: email_in_use
             message: This email already has an account that signs in with another provider.
+            details: []
+    Forbidden:
+      description: The user's profile does not allow this action.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: forbidden
+            message: Only platform admins can do this.
+            details: []
+    ConsentRequired:
+      description: The patient has not accepted the consent this feature needs.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: consent_required
+            message: Meal photos need the external_ai_processing consent.
+            details: []
+    ReadingImmutable:
+      description: Only manual readings can be corrected or deleted.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: reading_immutable
+            message: Readings from sensors and health platforms cannot be changed.
+            details: []
+    InvalidState:
+      description: The resource is not in a state that allows this action.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: invalid_state
+            message: A cancelled meal cannot be marked as eaten.
+            details: []
+    CategoryNameTaken:
+      description: A food category with this name already exists.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: category_name_taken
+            message: A category with this name already exists.
+            details: []
+    ServiceUnavailable:
+      description: A service the request depends on is not available. Try again later.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: service_unavailable
+            message: Open Food Facts is not available.
             details: []
 
   schemas:
@@ -1722,6 +5006,9 @@ components:
           type: integer
           minimum: 30
           maximum: 260
+        weekly_reports_enabled:
+          type: boolean
+          description: Generate a report of the previous week every Monday morning. `true` when left out.
         consents:
           type: array
           minItems: 2
@@ -1775,6 +5062,9 @@ components:
           type: [integer, 'null']
           minimum: 30
           maximum: 260
+        weekly_reports_enabled:
+          type: boolean
+          description: Generate a report of the previous week every Monday morning.
     Patient:
       type: object
       required:
@@ -1790,6 +5080,7 @@ components:
         - critical_high_mg_dl
         - weight_kg
         - height_cm
+        - weekly_reports_enabled
         - created_at
         - updated_at
       properties:
@@ -1828,6 +5119,9 @@ components:
           format: double
         height_cm:
           type: [integer, 'null']
+        weekly_reports_enabled:
+          type: boolean
+          description: Generate a report of the previous week every Monday morning.
         created_at:
           type: string
           format: date-time
@@ -1877,7 +5171,9 @@ components:
         device_id:
           type: string
           format: uuid
-          description: The device that took the reading, from `POST /v1/me/devices`.
+          description: |
+            The CGM sensor that took the reading, from `POST /v1/me/devices`.
+            Only `cgm_sensor` readings have a device.
         signal_quality:
           type: integer
           minimum: 0
@@ -2019,6 +5315,9 @@ components:
         - source_reading_id
         - source_prediction_id
         - device_id
+        - source_value_mg_dl
+        - acknowledged_by
+        - recipients
         - created_at
       properties:
         id:
@@ -2063,6 +5362,19 @@ components:
           type: [string, 'null']
           format: uuid
           description: The sensor that raised the alert, for `sensor_disconnected` and `sensor_expiring`.
+        source_value_mg_dl:
+          type: [integer, 'null']
+          description: Glucose of the reading or prediction that raised the alert.
+        acknowledged_by:
+          description: Who acknowledged or closed the alert first. `null` while it is pending.
+          anyOf:
+            - $ref: '#/components/schemas/AlertActor'
+            - type: 'null'
+        recipients:
+          type: array
+          description: Who was notified, by which channel, and how far each notification got.
+          items:
+            $ref: '#/components/schemas/AlertRecipient'
         created_at:
           type: string
           format: date-time
@@ -2162,3 +5474,1466 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Device'
+    DeviceStatusUpdate:
+      type: object
+      minProperties: 1
+      description: Only the fields sent are changed.
+      properties:
+        connection_status:
+          type: string
+          description: Whether the app can talk to the device now. The API sets `warming_up`, `expired` and `replaced` by itself.
+          enum: [active, disconnected]
+        battery_percent:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 100
+        last_reading_at:
+          type: string
+          format: date-time
+          description: Time of the latest reading the app got from the device. Sets `first_reading_at` the first time.
+
+    # --- Glucose: manual readings and long charts ---------------------------
+    ManualGlucoseReadingCreate:
+      type: object
+      required: [idempotency_key, measured_at, value_mg_dl]
+      properties:
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Unique key created on the phone, e.g. a UUID.
+        measured_at:
+          type: string
+          format: date-time
+          description: When the patient measured. Not in the future.
+        value_mg_dl:
+          type: integer
+          minimum: 20
+          maximum: 550
+    GlucoseReadingUpdate:
+      type: object
+      minProperties: 1
+      description: Only the fields sent are changed.
+      properties:
+        measured_at:
+          type: string
+          format: date-time
+        value_mg_dl:
+          type: integer
+          minimum: 20
+          maximum: 550
+    GlucoseResolution:
+      type: string
+      description: Length of each bucket. `15m` when left out.
+      enum: [15m, 1h]
+    GlucoseSeriesPoint:
+      type: object
+      required: [bucket_start, mean_mg_dl, min_mg_dl, max_mg_dl, readings_count]
+      properties:
+        bucket_start:
+          type: string
+          format: date-time
+        mean_mg_dl:
+          type: integer
+        min_mg_dl:
+          type: integer
+        max_mg_dl:
+          type: integer
+        readings_count:
+          type: integer
+          minimum: 1
+    GlucoseSeries:
+      type: object
+      required: [resolution, items]
+      properties:
+        resolution:
+          $ref: '#/components/schemas/GlucoseResolution'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/GlucoseSeriesPoint'
+
+    # --- Notifications ------------------------------------------------------
+    AlertChannel:
+      type: string
+      enum: [push, sms, email, in_app]
+    AlertDeliveryStatus:
+      type: string
+      description: '`pending` → `sent` → `delivered` → `read` → `acknowledged`, or `failed`. It never goes back.'
+      enum: [pending, sent, delivered, read, acknowledged, failed]
+    AlertRecipient:
+      type: object
+      description: One person and one channel of an alert.
+      required: [id, user_id, full_name, channel, delivery_status, sent_at, delivered_at, read_at, acknowledged_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The `recipient_id` for the receipt endpoints.
+        user_id:
+          type: string
+          format: uuid
+        full_name:
+          type: string
+        channel:
+          $ref: '#/components/schemas/AlertChannel'
+        delivery_status:
+          $ref: '#/components/schemas/AlertDeliveryStatus'
+        sent_at:
+          type: [string, 'null']
+          format: date-time
+        delivered_at:
+          type: [string, 'null']
+          format: date-time
+        read_at:
+          type: [string, 'null']
+          format: date-time
+        acknowledged_at:
+          type: [string, 'null']
+          format: date-time
+    AlertActor:
+      type: object
+      required: [user_id, full_name]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        full_name:
+          type: string
+    AlertResolution:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [resolved, dismissed]
+        resolution_notes:
+          type: [string, 'null']
+          maxLength: 255
+          description: What was done, in the patient's words.
+
+    # --- Activities ---------------------------------------------------------
+    ActivityIntensity:
+      type: string
+      enum: [light, moderate, vigorous]
+    ActivityCreate:
+      type: object
+      required: [idempotency_key, activity_name, started_at, duration_minutes, intensity]
+      properties:
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Unique key created on the phone, or the Health Connect session id.
+        activity_name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: E.g. "Caminhada". Free text, in the user's language.
+        started_at:
+          type: string
+          format: date-time
+          description: Not in the future.
+        duration_minutes:
+          type: integer
+          minimum: 1
+          maximum: 1440
+        intensity:
+          $ref: '#/components/schemas/ActivityIntensity'
+        total_steps:
+          type: integer
+          minimum: 0
+          maximum: 200000
+        avg_heart_rate_bpm:
+          type: integer
+          minimum: 30
+          maximum: 250
+        calories_burned_kcal:
+          type: integer
+          minimum: 0
+          maximum: 15000
+        device_id:
+          type: string
+          format: uuid
+          description: The watch the session came from, from `POST /v1/me/devices`.
+    ActivityBatch:
+      type: object
+      required: [activities]
+      properties:
+        activities:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/ActivityCreate'
+    ActivityUpdate:
+      type: object
+      minProperties: 1
+      description: Only the fields sent are changed. `null` clears an optional field.
+      properties:
+        activity_name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        started_at:
+          type: string
+          format: date-time
+        duration_minutes:
+          type: integer
+          minimum: 1
+          maximum: 1440
+        intensity:
+          $ref: '#/components/schemas/ActivityIntensity'
+        total_steps:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 200000
+        avg_heart_rate_bpm:
+          type: [integer, 'null']
+          minimum: 30
+          maximum: 250
+        calories_burned_kcal:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 15000
+    Activity:
+      type: object
+      required:
+        - id
+        - activity_name
+        - started_at
+        - duration_minutes
+        - intensity
+        - total_steps
+        - avg_heart_rate_bpm
+        - calories_burned_kcal
+        - device_id
+        - idempotency_key
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        activity_name:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        duration_minutes:
+          type: integer
+        intensity:
+          $ref: '#/components/schemas/ActivityIntensity'
+        total_steps:
+          type: [integer, 'null']
+        avg_heart_rate_bpm:
+          type: [integer, 'null']
+        calories_burned_kcal:
+          type: [integer, 'null']
+        device_id:
+          type: [string, 'null']
+          format: uuid
+        idempotency_key:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ActivityList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Activity'
+
+    # --- Foods --------------------------------------------------------------
+    FoodType:
+      type: string
+      description: A `composite_dish` is made of other foods, whose quantities can be adjusted in a meal.
+      enum: [generic, brand, composite_dish]
+    FoodDataSource:
+      type: string
+      description: |
+        `insa`: Portuguese food composition table (INSA). `open_food_facts`: a
+        packaged product found by barcode. `portuguese_traditional`: added by
+        the Voltik team. `user_custom`: created by a user. `fatsecret` is not
+        used.
+      enum: [insa, open_food_facts, portuguese_traditional, user_custom, fatsecret]
+    MetricUnit:
+      type: string
+      enum: [g, ml]
+    FoodCategoryRef:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+    FoodServing:
+      type: object
+      description: A portion of a food and its nutrition. Carbohydrates do not include fibre, as in European tables and labels.
+      required:
+        - id
+        - serving_description
+        - metric_amount
+        - metric_unit
+        - carbs_g
+        - fiber_g
+        - sugars_g
+        - calories_kcal
+        - protein_g
+        - fat_g
+        - saturated_fat_g
+        - sodium_mg
+      properties:
+        id:
+          type: string
+          format: uuid
+        serving_description:
+          type: string
+          description: E.g. "100 g" or "1 prato (300 g)".
+        metric_amount:
+          type: [number, 'null']
+          format: double
+          description: Weight or volume of the serving, in `metric_unit`.
+        metric_unit:
+          anyOf:
+            - $ref: '#/components/schemas/MetricUnit'
+            - type: 'null'
+        carbs_g:
+          type: number
+          format: double
+        fiber_g:
+          type: [number, 'null']
+          format: double
+        sugars_g:
+          type: [number, 'null']
+          format: double
+        calories_kcal:
+          type: number
+          format: double
+        protein_g:
+          type: number
+          format: double
+        fat_g:
+          type: number
+          format: double
+        saturated_fat_g:
+          type: [number, 'null']
+          format: double
+        sodium_mg:
+          type: [number, 'null']
+          format: double
+    FoodComponent:
+      type: object
+      description: An ingredient of a composite dish.
+      required: [id, component_food_id, food_name, default_quantity_g]
+      properties:
+        id:
+          type: string
+          format: uuid
+        component_food_id:
+          type: string
+          format: uuid
+        food_name:
+          type: string
+        default_quantity_g:
+          type: number
+          format: double
+          description: The usual quantity in one plate.
+    Food:
+      type: object
+      required:
+        - id
+        - food_name
+        - brand
+        - food_type
+        - data_source
+        - category
+        - barcode_ean
+        - is_verified
+        - is_own
+        - source_attribution
+        - servings
+        - components
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        food_name:
+          type: string
+        brand:
+          type: [string, 'null']
+        food_type:
+          $ref: '#/components/schemas/FoodType'
+        data_source:
+          $ref: '#/components/schemas/FoodDataSource'
+        category:
+          anyOf:
+            - $ref: '#/components/schemas/FoodCategoryRef'
+            - type: 'null'
+        barcode_ean:
+          type: [string, 'null']
+        is_verified:
+          type: boolean
+          description: Reviewed by the Voltik nutrition team.
+        is_own:
+          type: boolean
+          description: Created by the signed-in user.
+        source_attribution:
+          type: [string, 'null']
+          description: Show it wherever the food's values appear. The data licences require it.
+        servings:
+          type: array
+          items:
+            $ref: '#/components/schemas/FoodServing'
+        components:
+          type: array
+          description: The ingredients of a composite dish made by the Voltik team. Empty for other foods, including the INSA dishes, which come with their values ready.
+          items:
+            $ref: '#/components/schemas/FoodComponent'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    FoodList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Food'
+    ServingInput:
+      type: object
+      required: [serving_description, carbs_g, calories_kcal]
+      description: Sugars cannot exceed carbohydrates and saturated fat cannot exceed fat.
+      properties:
+        serving_description:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Unique within the food, e.g. "1 fatia (50 g)".
+        metric_amount:
+          type: number
+          format: double
+          minimum: 0.01
+          maximum: 50000
+        metric_unit:
+          $ref: '#/components/schemas/MetricUnit'
+        carbs_g:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+        fiber_g:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+        sugars_g:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+        calories_kcal:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 9000
+        protein_g:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+        fat_g:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+        saturated_fat_g:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+        sodium_mg:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 50000
+    ServingUpdate:
+      type: object
+      minProperties: 1
+      description: Only the fields sent are changed. `null` clears an optional field.
+      properties:
+        serving_description:
+          type: string
+          minLength: 1
+          maxLength: 100
+        metric_amount:
+          type: [number, 'null']
+          format: double
+          minimum: 0.01
+          maximum: 50000
+        metric_unit:
+          anyOf:
+            - $ref: '#/components/schemas/MetricUnit'
+            - type: 'null'
+        carbs_g:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+        fiber_g:
+          type: [number, 'null']
+          format: double
+          minimum: 0
+          maximum: 1000
+        sugars_g:
+          type: [number, 'null']
+          format: double
+          minimum: 0
+          maximum: 1000
+        calories_kcal:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 9000
+        protein_g:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+        fat_g:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1000
+        saturated_fat_g:
+          type: [number, 'null']
+          format: double
+          minimum: 0
+          maximum: 1000
+        sodium_mg:
+          type: [number, 'null']
+          format: double
+          minimum: 0
+          maximum: 50000
+    FoodCreate:
+      type: object
+      required: [food_name, servings]
+      properties:
+        food_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        brand:
+          type: string
+          minLength: 1
+          maxLength: 100
+        food_type:
+          type: string
+          description: '`generic` when left out.'
+          enum: [generic, brand]
+        barcode_ean:
+          type: string
+          pattern: '^[0-9]{8,14}$'
+        category_id:
+          type: string
+          format: uuid
+          description: From `GET /v1/food-categories`.
+        servings:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/ServingInput'
+    FoodCategory:
+      type: object
+      required: [id, name, food_count, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        food_count:
+          type: integer
+          minimum: 0
+          description: Foods in the category that are visible in the search.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    FoodCategoryList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/FoodCategory'
+    FoodCategoryInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Unique.
+    AdminFoodCreate:
+      type: object
+      required: [food_name, food_type]
+      properties:
+        food_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        brand:
+          type: string
+          minLength: 1
+          maxLength: 100
+        food_type:
+          $ref: '#/components/schemas/FoodType'
+        barcode_ean:
+          type: string
+          pattern: '^[0-9]{8,14}$'
+        category_id:
+          type: string
+          format: uuid
+        servings:
+          type: array
+          maxItems: 20
+          description: Needed for foods that are not composite dishes.
+          items:
+            $ref: '#/components/schemas/ServingInput'
+    AdminFoodUpdate:
+      type: object
+      minProperties: 1
+      description: Only the fields sent are changed. `null` clears an optional field.
+      properties:
+        food_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        brand:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 100
+        barcode_ean:
+          type: [string, 'null']
+          pattern: '^[0-9]{8,14}$'
+        category_id:
+          type: [string, 'null']
+          format: uuid
+    AdminFoodItem:
+      type: object
+      required: [food, usage_count]
+      properties:
+        food:
+          $ref: '#/components/schemas/Food'
+        usage_count:
+          type: integer
+          minimum: 0
+          description: Meal items that use the food.
+    AdminFoodPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminFoodItem'
+        next_cursor:
+          type: [string, 'null']
+          description: Cursor for the next page. `null` on the last page.
+    FoodComponentCreate:
+      type: object
+      required: [component_food_id, default_quantity_g]
+      properties:
+        component_food_id:
+          type: string
+          format: uuid
+        default_quantity_g:
+          type: number
+          format: double
+          minimum: 0.01
+          maximum: 10000
+
+    # --- Meals --------------------------------------------------------------
+    MealType:
+      type: string
+      enum: [breakfast, morning_snack, lunch, afternoon_snack, dinner, evening_snack, other]
+    MealStatus:
+      type: string
+      enum: [planned, eaten, cancelled]
+    MealItemInput:
+      type: object
+      required: [serving_id]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Only in `PUT /v1/me/meals/{meal_id}/items`, to keep an existing item.
+        serving_id:
+          type: string
+          format: uuid
+          description: A serving from the catalogue. Its food comes with it.
+        serving_quantity:
+          type: number
+          format: double
+          minimum: 0.01
+          maximum: 100
+          description: How many servings, e.g. 0.5. 1 when left out.
+        is_eaten:
+          type: boolean
+          description: '`false` keeps the item but leaves it out of the totals, e.g. food left on the plate. `true` when left out.'
+    MealItem:
+      type: object
+      required: [id, food_id, food_name, serving_id, serving_description, serving_quantity, carbs_g, calories_kcal, is_eaten, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        food_id:
+          type: string
+          format: uuid
+        food_name:
+          type: string
+        serving_id:
+          type: string
+          format: uuid
+        serving_description:
+          type: string
+        serving_quantity:
+          type: number
+          format: double
+        carbs_g:
+          type: number
+          format: double
+          description: The serving's carbohydrates times the quantity, as they were when the item was logged.
+        calories_kcal:
+          type: number
+          format: double
+        is_eaten:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+    MealCreate:
+      type: object
+      required: [meal_type, status]
+      properties:
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Unique key created on the phone. Recommended, so a resent meal is not stored twice.
+        meal_type:
+          $ref: '#/components/schemas/MealType'
+        status:
+          type: string
+          enum: [planned, eaten]
+        meal_date:
+          type: string
+          format: date
+          description: Needed for planned meals. For eaten meals, the day of `eaten_at` when left out.
+        planned_time:
+          type: string
+          pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          description: Planned time in Portugal, `HH:MM`.
+        eaten_at:
+          type: string
+          format: date-time
+          description: Eaten meals only. Now when left out. Not in the future.
+        notes:
+          type: string
+          maxLength: 1000
+        items:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/MealItemInput'
+        total_carbs_g:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 2000
+          description: Only for a meal without items.
+        total_calories_kcal:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 15000
+          description: Only for a meal without items.
+    MealUpdate:
+      type: object
+      minProperties: 1
+      description: Only the fields sent are changed. `null` clears an optional field.
+      properties:
+        meal_type:
+          $ref: '#/components/schemas/MealType'
+        meal_date:
+          type: string
+          format: date
+        planned_time:
+          type: [string, 'null']
+          pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+        eaten_at:
+          type: string
+          format: date-time
+          description: Eaten meals only.
+        notes:
+          type: [string, 'null']
+          maxLength: 1000
+        total_carbs_g:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 2000
+          description: Only for a meal without items.
+        total_calories_kcal:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 15000
+          description: Only for a meal without items.
+    MealItemsReplace:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/MealItemInput'
+    MealEaten:
+      type: object
+      properties:
+        eaten_at:
+          type: string
+          format: date-time
+          description: Now when left out. Not in the future.
+    Meal:
+      type: object
+      required:
+        - id
+        - meal_type
+        - meal_date
+        - planned_time
+        - status
+        - eaten_at
+        - total_carbs_g
+        - total_calories_kcal
+        - postprandial_delta_mg_dl
+        - notes
+        - idempotency_key
+        - items
+        - photos
+        - insulin_logs
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        meal_type:
+          $ref: '#/components/schemas/MealType'
+        meal_date:
+          type: string
+          format: date
+        planned_time:
+          type: [string, 'null']
+          description: '`HH:MM`, in Portugal.'
+        status:
+          $ref: '#/components/schemas/MealStatus'
+        eaten_at:
+          type: [string, 'null']
+          format: date-time
+        total_carbs_g:
+          type: number
+          format: double
+        total_calories_kcal:
+          type: number
+          format: double
+        postprandial_delta_mg_dl:
+          type: [integer, 'null']
+          description: |
+            The largest change of glucose in the 2 hours after the meal,
+            compared with the start of the meal. Filled in about 2 hours after
+            `eaten_at`, when there are enough readings.
+        notes:
+          type: [string, 'null']
+        idempotency_key:
+          type: [string, 'null']
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MealItem'
+        photos:
+          type: array
+          items:
+            $ref: '#/components/schemas/MealPhoto'
+        insulin_logs:
+          type: array
+          description: Insulin doses linked to the meal.
+          items:
+            $ref: '#/components/schemas/InsulinLog'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    MealList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Meal'
+    MealPhotoStatus:
+      type: string
+      enum: [pending, completed, failed]
+    MealPhotoProposedItem:
+      type: object
+      description: A food the model recognised, matched with the catalogue when possible.
+      required: [name, estimated_weight_g, estimated_carbs_g, estimated_calories_kcal, food_id, serving_id, serving_quantity]
+      properties:
+        name:
+          type: string
+          description: What the model saw, in Portuguese.
+        estimated_weight_g:
+          type: [number, 'null']
+          format: double
+        estimated_carbs_g:
+          type: [number, 'null']
+          format: double
+        estimated_calories_kcal:
+          type: [number, 'null']
+          format: double
+        food_id:
+          type: [string, 'null']
+          format: uuid
+          description: The closest food in the catalogue, if any.
+        serving_id:
+          type: [string, 'null']
+          format: uuid
+        serving_quantity:
+          type: [number, 'null']
+          format: double
+          description: Servings of `serving_id` that match the estimated weight.
+    MealPhoto:
+      type: object
+      required:
+        - id
+        - meal_id
+        - analysis_status
+        - image_url
+        - image_url_expires_at
+        - estimated_weight_g
+        - estimated_carbs_g
+        - estimated_calories_kcal
+        - confidence_percent
+        - low_confidence
+        - proposed_items
+        - analyzed_at
+        - confirmed_at
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        meal_id:
+          type: string
+          format: uuid
+        analysis_status:
+          $ref: '#/components/schemas/MealPhotoStatus'
+        image_url:
+          type: string
+          format: uri
+          description: Signed link to the image, valid for 15 minutes.
+        image_url_expires_at:
+          type: string
+          format: date-time
+        estimated_weight_g:
+          type: [number, 'null']
+          format: double
+        estimated_carbs_g:
+          type: [number, 'null']
+          format: double
+        estimated_calories_kcal:
+          type: [number, 'null']
+          format: double
+        confidence_percent:
+          type: [number, 'null']
+          format: double
+        low_confidence:
+          type: boolean
+          description: Confidence below 60 %. Ask the patient to check each item.
+        proposed_items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MealPhotoProposedItem'
+        analyzed_at:
+          type: [string, 'null']
+          format: date-time
+        confirmed_at:
+          type: [string, 'null']
+          format: date-time
+          description: When the patient confirmed or rejected the proposal.
+        created_at:
+          type: string
+          format: date-time
+    MealPhotoUpload:
+      type: object
+      required: [photo]
+      properties:
+        photo:
+          type: string
+          format: binary
+          description: JPEG, PNG or WebP, at most 5 MB, without EXIF data.
+    MealPhotoConfirmation:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 50
+          description: The items to add to the meal, without `id`. Empty to reject the proposal.
+          items:
+            $ref: '#/components/schemas/MealItemInput'
+
+    # --- Insulin ------------------------------------------------------------
+    InsulinType:
+      type: string
+      enum: [rapid_bolus, ultra_rapid_bolus, basal, premixed]
+    InsulinReason:
+      type: string
+      enum: [meal, correction, scheduled_basal, mixed]
+    InsulinLogCreate:
+      type: object
+      required: [idempotency_key, insulin_type, dose_units, administered_at, reason]
+      properties:
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 100
+        insulin_type:
+          $ref: '#/components/schemas/InsulinType'
+        insulin_brand:
+          type: string
+          minLength: 1
+          maxLength: 80
+        dose_units:
+          type: number
+          format: double
+          minimum: 0.1
+          maximum: 100
+          description: Units, with one decimal place.
+        administered_at:
+          type: string
+          format: date-time
+          description: Not in the future.
+        reason:
+          $ref: '#/components/schemas/InsulinReason'
+        meal_id:
+          type: string
+          format: uuid
+          description: One of the patient's meals.
+        notes:
+          type: string
+          maxLength: 255
+    InsulinLogUpdate:
+      type: object
+      minProperties: 1
+      description: Only the fields sent are changed. `null` clears an optional field.
+      properties:
+        insulin_type:
+          $ref: '#/components/schemas/InsulinType'
+        insulin_brand:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 80
+        dose_units:
+          type: number
+          format: double
+          minimum: 0.1
+          maximum: 100
+        administered_at:
+          type: string
+          format: date-time
+        reason:
+          $ref: '#/components/schemas/InsulinReason'
+        meal_id:
+          type: [string, 'null']
+          format: uuid
+        notes:
+          type: [string, 'null']
+          maxLength: 255
+    InsulinLog:
+      type: object
+      required:
+        - id
+        - insulin_type
+        - insulin_brand
+        - dose_units
+        - administered_at
+        - reason
+        - meal_id
+        - notes
+        - idempotency_key
+        - edited_after_24h
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        insulin_type:
+          $ref: '#/components/schemas/InsulinType'
+        insulin_brand:
+          type: [string, 'null']
+        dose_units:
+          type: number
+          format: double
+        administered_at:
+          type: string
+          format: date-time
+        reason:
+          $ref: '#/components/schemas/InsulinReason'
+        meal_id:
+          type: [string, 'null']
+          format: uuid
+        notes:
+          type: [string, 'null']
+        idempotency_key:
+          type: [string, 'null']
+        edited_after_24h:
+          type: boolean
+          description: The dose was corrected more than 24 hours after it was taken.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    InsulinDailyTotal:
+      type: object
+      required: [date, insulin_type, total_units, doses]
+      properties:
+        date:
+          type: string
+          format: date
+        insulin_type:
+          $ref: '#/components/schemas/InsulinType'
+        total_units:
+          type: number
+          format: double
+        doses:
+          type: integer
+          minimum: 1
+    InsulinLogList:
+      type: object
+      required: [items, daily_totals]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InsulinLog'
+        daily_totals:
+          type: array
+          description: One entry per day and insulin type that has doses.
+          items:
+            $ref: '#/components/schemas/InsulinDailyTotal'
+
+    # --- Stats and reports --------------------------------------------------
+    GlucoseStats:
+      type: object
+      required:
+        - from
+        - to
+        - target_min_mg_dl
+        - target_max_mg_dl
+        - readings_count
+        - coverage_percent
+        - time_in_range_percent
+        - time_below_range_percent
+        - time_above_range_percent
+        - mean_glucose_mg_dl
+        - std_dev_mg_dl
+        - coefficient_of_variation_percent
+        - gmi_percent
+        - hypo_episodes
+        - hyper_episodes
+        - active_minutes
+      properties:
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        target_min_mg_dl:
+          type: integer
+          description: The lower limit used for TIR, TBR and TAR (the patient's own).
+        target_max_mg_dl:
+          type: integer
+        readings_count:
+          type: integer
+          minimum: 0
+        coverage_percent:
+          type: number
+          format: double
+          description: Share of 5-minute slots with a reading.
+        time_in_range_percent:
+          type: [number, 'null']
+          format: double
+        time_below_range_percent:
+          type: [number, 'null']
+          format: double
+        time_above_range_percent:
+          type: [number, 'null']
+          format: double
+        mean_glucose_mg_dl:
+          type: [integer, 'null']
+        std_dev_mg_dl:
+          type: [number, 'null']
+          format: double
+        coefficient_of_variation_percent:
+          type: [number, 'null']
+          format: double
+        gmi_percent:
+          type: [number, 'null']
+          format: double
+          description: Glucose management indicator (estimated HbA1c).
+        hypo_episodes:
+          type: integer
+          minimum: 0
+        hyper_episodes:
+          type: integer
+          minimum: 0
+        active_minutes:
+          type: integer
+          minimum: 0
+          description: Minutes of physical activity that started in the period.
+    ReportPeriodType:
+      type: string
+      enum: [day, week, month, custom]
+    ReportGeneratedBy:
+      type: string
+      description: '`system_scheduled` is the weekly report that the API generates on Mondays.'
+      enum: [patient, professional, system_scheduled]
+    ReportCreate:
+      type: object
+      required: [period_type, start_date, end_date]
+      properties:
+        period_type:
+          $ref: '#/components/schemas/ReportPeriodType'
+        start_date:
+          type: string
+          format: date
+        end_date:
+          type: string
+          format: date
+          description: Inclusive. At most 90 days after `start_date` and not after today.
+    ClinicalReport:
+      type: object
+      required:
+        - id
+        - period_type
+        - start_date
+        - end_date
+        - generated_by_role
+        - target_min_mg_dl
+        - target_max_mg_dl
+        - coverage_percent
+        - low_coverage
+        - time_in_range_percent
+        - time_below_range_percent
+        - time_above_range_percent
+        - mean_glucose_mg_dl
+        - std_dev_mg_dl
+        - coefficient_of_variation_percent
+        - gmi_percent
+        - hypo_episodes
+        - hyper_episodes
+        - iris_summary
+        - work_impact_analysis
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        period_type:
+          $ref: '#/components/schemas/ReportPeriodType'
+        start_date:
+          type: string
+          format: date
+        end_date:
+          type: string
+          format: date
+        generated_by_role:
+          $ref: '#/components/schemas/ReportGeneratedBy'
+        target_min_mg_dl:
+          type: integer
+          description: The target range when the report was generated.
+        target_max_mg_dl:
+          type: integer
+        coverage_percent:
+          type: number
+          format: double
+        low_coverage:
+          type: boolean
+          description: 'Coverage below 70 %. Show "dados insuficientes para conclusões clínicas".'
+        time_in_range_percent:
+          type: number
+          format: double
+        time_below_range_percent:
+          type: number
+          format: double
+        time_above_range_percent:
+          type: number
+          format: double
+        mean_glucose_mg_dl:
+          type: integer
+        std_dev_mg_dl:
+          type: [number, 'null']
+          format: double
+        coefficient_of_variation_percent:
+          type: [number, 'null']
+          format: double
+        gmi_percent:
+          type: [number, 'null']
+          format: double
+        hypo_episodes:
+          type: integer
+        hyper_episodes:
+          type: integer
+        iris_summary:
+          type: [string, 'null']
+          description: Plain summary by Iris, in Portuguese. Never suggests doses or diagnoses.
+        work_impact_analysis:
+          type: [string, 'null']
+          description: How glucose related to the working day, by Iris.
+        created_at:
+          type: string
+          format: date-time
+    ReportPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClinicalReport'
+        next_cursor:
+          type: [string, 'null']
+          description: Cursor for the next page. `null` on the last page.
+    FileLink:
+      type: object
+      required: [url, expires_at]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Works without the `Authorization` header until `expires_at`.
+        expires_at:
+          type: string
+          format: date-time
+
+    # --- Webhooks -----------------------------------------------------------
+    SmsStatusCallback:
+      type: object
+      description: The fields Voltik reads from a Twilio status callback.
+      required: [MessageSid, MessageStatus]
+      properties:
+        MessageSid:
+          type: string
+        MessageStatus:
+          type: string
+          description: '`queued`, `sent`, `delivered`, `undelivered` or `failed`.'
+        ErrorCode:
+          type: string
+
+    # --- Nightscout ---------------------------------------------------------
+    NightscoutSecret:
+      type: object
+      required: [nightscout_url, api_secret, created_at]
+      properties:
+        nightscout_url:
+          type: string
+          format: uri
+          description: The "Nightscout URL" to set in Juggluco or xDrip+.
+        api_secret:
+          type: string
+          description: The "API secret" to set in the app. Shown only once.
+        created_at:
+          type: string
+          format: date-time
+    NightscoutEntry:
+      type: object
+      description: A Nightscout entry. Voltik reads `type`, `sgv`/`mbg`, `date` and `direction`.
+      required: [type, date]
+      properties:
+        type:
+          type: string
+          description: '`sgv` (sensor) or `mbg` (finger-prick). Others are ignored.'
+        sgv:
+          type: integer
+          description: Sensor glucose in mg/dL.
+        mbg:
+          type: integer
+          description: Meter glucose in mg/dL.
+        date:
+          type: integer
+          format: int64
+          description: When the reading was taken, in milliseconds since 1970-01-01 UTC.
+        dateString:
+          type: string
+        direction:
+          type: string
+          description: Trend arrow, e.g. `Flat`, `FortyFiveUp`, `SingleDown`, `DoubleUp`.
+        device:
+          type: string
+    NightscoutStatus:
+      type: object
+      required: [status, name, version, serverTime, serverTimeEpoch, apiEnabled, careportalEnabled, settings]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        name:
+          type: string
+        version:
+          type: string
+        serverTime:
+          type: string
+        serverTimeEpoch:
+          type: integer
+          format: int64
+        apiEnabled:
+          type: boolean
+        careportalEnabled:
+          type: boolean
+        settings:
+          type: object
+          required: [units]
+          properties:
+            units:
+              type: string
+              enum: [mg/dl]

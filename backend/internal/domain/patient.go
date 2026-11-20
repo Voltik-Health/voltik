@@ -31,10 +31,12 @@ type Patient struct {
 	DiabetesType string
 	Therapy      *string
 	Thresholds
-	WeightKg  *float64
-	HeightCm  *int
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	WeightKg *float64
+	HeightCm *int
+	// A report of the previous week every Monday (UC147).
+	WeeklyReportsEnabled bool
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 // Limits of the patients table (migration 000002).

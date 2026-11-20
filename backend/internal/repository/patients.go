@@ -14,7 +14,7 @@ import (
 const patientColumns = `
 	p.id, p.user_id, p.birth_date, g.code, p.occupation, d.code, t.code,
 	p.target_min_mg_dl, p.target_max_mg_dl, p.critical_low_mg_dl, p.critical_high_mg_dl,
-	p.weight_kg, p.height_cm, p.created_at, p.updated_at`
+	p.weight_kg, p.height_cm, p.weekly_reports_enabled, p.created_at, p.updated_at`
 
 const patientFrom = `
 	  FROM patients p
@@ -26,7 +26,7 @@ func scanPatient(row pgx.Row) (domain.Patient, error) {
 	var p domain.Patient
 	err := row.Scan(&p.ID, &p.UserID, &p.BirthDate, &p.Gender, &p.Occupation, &p.DiabetesType, &p.Therapy,
 		&p.TargetMin, &p.TargetMax, &p.CriticalLow, &p.CriticalHigh,
-		&p.WeightKg, &p.HeightCm, &p.CreatedAt, &p.UpdatedAt)
+		&p.WeightKg, &p.HeightCm, &p.WeeklyReportsEnabled, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Patient{}, domain.ErrPatientProfileNotFound
 	}
@@ -79,11 +79,11 @@ func (s *Store) CreatePatient(ctx context.Context, p domain.Patient, docs []doma
 		err = tx.QueryRow(ctx, `
 			INSERT INTO patients (user_id, birth_date, gender_id, occupation, diabetes_type_id, therapy_type_id,
 			                      target_min_mg_dl, target_max_mg_dl, critical_low_mg_dl, critical_high_mg_dl,
-			                      weight_kg, height_cm)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			                      weight_kg, height_cm, weekly_reports_enabled)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			RETURNING id, created_at, updated_at`,
 			p.UserID, p.BirthDate, ids.gender, p.Occupation, ids.diabetesType, ids.therapy,
-			p.TargetMin, p.TargetMax, p.CriticalLow, p.CriticalHigh, p.WeightKg, p.HeightCm).
+			p.TargetMin, p.TargetMax, p.CriticalLow, p.CriticalHigh, p.WeightKg, p.HeightCm, p.WeeklyReportsEnabled).
 			Scan(&p.ID, &p.CreatedAt, &p.UpdatedAt)
 		if err != nil {
 			return err
@@ -126,11 +126,11 @@ func (s *Store) UpdatePatient(ctx context.Context, userID uuid.UUID, apply func(
 			UPDATE patients
 			   SET birth_date = $2, gender_id = $3, occupation = $4, diabetes_type_id = $5, therapy_type_id = $6,
 			       target_min_mg_dl = $7, target_max_mg_dl = $8, critical_low_mg_dl = $9, critical_high_mg_dl = $10,
-			       weight_kg = $11, height_cm = $12
+			       weight_kg = $11, height_cm = $12, weekly_reports_enabled = $13
 			 WHERE id = $1
 			RETURNING updated_at`,
 			p.ID, p.BirthDate, ids.gender, p.Occupation, ids.diabetesType, ids.therapy,
-			p.TargetMin, p.TargetMax, p.CriticalLow, p.CriticalHigh, p.WeightKg, p.HeightCm).
+			p.TargetMin, p.TargetMax, p.CriticalLow, p.CriticalHigh, p.WeightKg, p.HeightCm, p.WeeklyReportsEnabled).
 			Scan(&p.UpdatedAt)
 	})
 	return p, err

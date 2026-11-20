@@ -42,6 +42,6 @@ The row is erased, not anonymised: nothing needs it once the data hanging from i
 ## Consequences
 - Nothing is erased before the 30 days, so recovering an account (UC017, `POST /v1/me/restore`) can be added later without changing this design. It is not implemented yet.
 - During the 30 days the person cannot create a new account with the same provider identity. The email is free at once: emails are unique only among live accounts.
-- When files reach object storage (meal photos, report PDFs), the job must delete them too (UC018, step 5).
+- Meal photos and report PDFs live in `stored_files`, which is `ON DELETE CASCADE` from the patient, so the job erases them too (UC018, step 5; ADR 0007). If they move to object storage, the job must delete them there.
 - Database backups keep erased accounts until they expire, so the backup retention set in voltik-infra limits how long erased data really lasts.
 - The job runs in the API container: if no instance is up at 03:00 UTC, that day's run is skipped, and the next run erases everything that is due.

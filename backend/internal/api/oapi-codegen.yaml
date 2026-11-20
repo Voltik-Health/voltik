@@ -10,4 +10,24 @@ output-options:
   # PATCH bodies tell "field left out" from "field sent as null"
   nullable-type: true
   # Only the endpoints implemented so far. Add a tag when its ticket starts.
-  include-tags: [System, Auth, Account, Consents, Patient]
+  # Files, Webhooks and Integrations are plain http.Handlers (internal/handler):
+  # they are not JSON in, JSON out, and they authenticate without the bearer token.
+  include-tags:
+    - System
+    - Auth
+    - Account
+    - Consents
+    - Patient
+    - Push tokens
+    - Glucose
+    - Heart rate
+    - Alerts
+    - Notifications
+    - Devices
+    - Activities
+    - Foods
+    - Food catalogue
+    - Meals
+    - Insulin
+    - Stats
+    - Reports

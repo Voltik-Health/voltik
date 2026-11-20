@@ -81,20 +81,21 @@ func toSession(s domain.Session) api.Session {
 
 func toPatient(p domain.Patient) api.Patient {
 	return api.Patient{
-		Id:               p.ID,
-		BirthDate:        openapi_types.Date{Time: p.BirthDate},
-		Gender:           nullableAs[api.Gender](p.Gender),
-		Occupation:       nullableOf(p.Occupation),
-		DiabetesType:     api.DiabetesType(p.DiabetesType),
-		CurrentTherapy:   nullableAs[api.Therapy](p.Therapy),
-		TargetMinMgDl:    p.TargetMin,
-		TargetMaxMgDl:    p.TargetMax,
-		CriticalLowMgDl:  p.CriticalLow,
-		CriticalHighMgDl: p.CriticalHigh,
-		WeightKg:         nullableOf(p.WeightKg),
-		HeightCm:         nullableOf(p.HeightCm),
-		CreatedAt:        p.CreatedAt.UTC(),
-		UpdatedAt:        p.UpdatedAt.UTC(),
+		Id:                   p.ID,
+		BirthDate:            openapi_types.Date{Time: p.BirthDate},
+		Gender:               nullableAs[api.Gender](p.Gender),
+		Occupation:           nullableOf(p.Occupation),
+		DiabetesType:         api.DiabetesType(p.DiabetesType),
+		CurrentTherapy:       nullableAs[api.Therapy](p.Therapy),
+		TargetMinMgDl:        p.TargetMin,
+		TargetMaxMgDl:        p.TargetMax,
+		CriticalLowMgDl:      p.CriticalLow,
+		CriticalHighMgDl:     p.CriticalHigh,
+		WeightKg:             nullableOf(p.WeightKg),
+		HeightCm:             nullableOf(p.HeightCm),
+		WeeklyReportsEnabled: p.WeeklyReportsEnabled,
+		CreatedAt:            p.CreatedAt.UTC(),
+		UpdatedAt:            p.UpdatedAt.UTC(),
 	}
 }
 
