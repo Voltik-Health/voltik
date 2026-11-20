@@ -375,9 +375,12 @@ type Patient struct {
 	TargetMaxMgDl int `json:"target_max_mg_dl"`
 
 	// TargetMinMgDl Lower end of the target range (time in range).
-	TargetMinMgDl int                        `json:"target_min_mg_dl"`
-	UpdatedAt     time.Time                  `json:"updated_at"`
-	WeightKg      nullable.Nullable[float64] `json:"weight_kg"`
+	TargetMinMgDl int       `json:"target_min_mg_dl"`
+	UpdatedAt     time.Time `json:"updated_at"`
+
+	// WeeklyReportsEnabled Generate a report of the previous week every Monday morning.
+	WeeklyReportsEnabled bool                       `json:"weekly_reports_enabled"`
+	WeightKg             nullable.Nullable[float64] `json:"weight_kg"`
 }
 
 // PatientCreate defines model for PatientCreate.
@@ -396,7 +399,10 @@ type PatientCreate struct {
 	Occupation       *string             `json:"occupation,omitempty"`
 	TargetMaxMgDl    *int                `json:"target_max_mg_dl,omitempty"`
 	TargetMinMgDl    *int                `json:"target_min_mg_dl,omitempty"`
-	WeightKg         *float64            `json:"weight_kg,omitempty"`
+
+	// WeeklyReportsEnabled Generate a report of the previous week every Monday morning. `true` when left out.
+	WeeklyReportsEnabled *bool    `json:"weekly_reports_enabled,omitempty"`
+	WeightKg             *float64 `json:"weight_kg,omitempty"`
 }
 
 // PatientUpdate Only the fields sent are changed. `null` clears an optional field.
@@ -412,7 +418,10 @@ type PatientUpdate struct {
 	Occupation       nullable.Nullable[string]  `json:"occupation,omitempty"`
 	TargetMaxMgDl    *int                       `json:"target_max_mg_dl,omitempty"`
 	TargetMinMgDl    *int                       `json:"target_min_mg_dl,omitempty"`
-	WeightKg         nullable.Nullable[float64] `json:"weight_kg,omitempty"`
+
+	// WeeklyReportsEnabled Generate a report of the previous week every Monday morning.
+	WeeklyReportsEnabled *bool                      `json:"weekly_reports_enabled,omitempty"`
+	WeightKg             nullable.Nullable[float64] `json:"weight_kg,omitempty"`
 }
 
 // ProfileType Which area of the apps the user can open.
