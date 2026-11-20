@@ -1,10 +1,10 @@
-# Segredos
+# Secrets
 .env
 *.pem
 *.key
 id_rsa*
 
-# Sistema e editores
+# OS and editors
 .DS_Store
 .idea/
 .vscode/
@@ -21,8 +21,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-ml/modelos/*.pkl
-ml/dados/
+ml/models/*.pkl
+ml/data/
 
 # Android (Kotlin)
 android/.gradle/
@@ -45,6 +45,6 @@ ios/build/
 web/node_modules/
 web/dist/
 
-# Cópias de segurança da base de dados
+# Database backups
 *.dump
 backups/

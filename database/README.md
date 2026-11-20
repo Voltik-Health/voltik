@@ -1,88 +1,133 @@
-# Base de dados
+# Database
 
-PostgreSQL 17 em Docker. O esquema é gerido por **migrações** com o
-[golang-migrate](https://github.com/golang-migrate/migrate): cada alteração é um par de ficheiros numerados em `migrations/`.
+PostgreSQL 17 in Docker. The schema is managed with **migrations** using
+[golang-migrate](https://github.com/golang-migrate/migrate): every change is a pair of files in `migrations/`.
 
-## Pastas
+## Folders
 
-| Pasta | Para quê |
+| Folder | Purpose |
 |---|---|
-| `migrations/` | Alterações ao esquema, por ordem. `NNNNNN_nome.up.sql` aplica, `.down.sql` reverte. |
-| `init/` | Corre uma única vez, no primeiro arranque: cria a base `voltik` e os três papéis. |
-| `seeds/` | Dados **fictícios** para desenvolvimento. |
+| `migrations/` | Schema changes, in order. `<version>_<name>.up.sql` applies, `.down.sql` reverts. |
+| `init/` | Runs once, on first start: creates the `voltik` database and the three roles. |
+| `local/` | Local only: creates `voltik_test`, the database of the backend integration tests (`backend/README.md`). |
+| `seeds/` | **Fictitious** data for development and staging. |
 
-## Papéis (utilizadores da base de dados)
+## Roles (database users)
 
-| Papel | Pode | Usado por |
+| Role | Can | Used by |
 |---|---|---|
-| `postgres` | Tudo (superutilizador) | Só administração. Nunca na aplicação. |
-| `voltik_migracoes` | Criar e alterar tabelas | golang-migrate |
-| `voltik_api` | Ler e escrever dados; na auditoria só pode inserir | API em Go |
-| `voltik_leitura` | Só ler | DBeaver no dia a dia, análises |
+| `postgres` | Everything (superuser) | Administration only. Never by the application. |
+| `voltik_migrations` | Create and alter tables | golang-migrate |
+| `voltik_api` | Read and write data; insert-only on the audit log | Go API |
+| `voltik_readonly` | Read only | Day-to-day DBeaver, analysis |
 
-## Onde corre
+## Where it runs
 
-| Ambiente | Onde | Porta para o túnel SSH |
+| Environment | Where | SSH tunnel port |
 |---|---|---|
-| Staging | Servidor, projeto Docker `voltik-staging` | `5433` |
-| Produção | Servidor, projeto Docker `voltik-producao` | `5434` |
-| Local (opcional) | Mac, `docker-compose.yml` da raiz | `5432` |
+| Staging | Server, Docker project `voltik-staging` | `5433` |
+| Production | Server, Docker project `voltik-production` | `5434` |
+| Local (optional) | Mac, root `docker-compose.yml` | `5432` (`VOLTIK_DB_PORT` in `.env`) |
 
-As migrações são aplicadas **pelo Jenkins** em cada publicação (`infra/server/publicar.sh`).
-Os comandos abaixo são para a base de dados local opcional.
+Migrations are applied **by Jenkins** on every deployment via `voltik-infra` (`deploy.sh`).
+The commands below are for the optional local database.
 
-## Comandos (local, opcional)
+## Commands (local, optional)
 
 ```bash
-# Arrancar / parar
+# Start / stop
 docker compose up -d db
 docker compose stop db
 
-# Migrações
-docker compose --profile ferramentas run --rm migrate up        # aplica tudo o que falta
-docker compose --profile ferramentas run --rm migrate down 1    # reverte a última
-docker compose --profile ferramentas run --rm migrate version   # versão atual
+# Migrations
+docker compose --profile tools run --rm migrate up        # apply everything pending
+docker compose --profile tools run --rm migrate down 1    # revert the last one
+docker compose --profile tools run --rm migrate version   # current version
 
-# Dados de exemplo
-docker compose exec -T db psql -U voltik_migracoes -d voltik < database/seeds/dev_dados_exemplo.sql
+# Sample data
+docker compose exec -T db psql -U voltik_migrations -d voltik < database/seeds/dev_sample_data.sql
 
-# Consola SQL
-docker compose exec db psql -U voltik_leitura -d voltik
+# SQL console
+docker compose exec db psql -U voltik_readonly -d voltik
 
-# Recomeçar do zero (APAGA TUDO o que está no volume local)
+# Start over (DELETES EVERYTHING in the local volume)
 docker compose down -v
 ```
 
-## Criar uma nova migração
+## Migrations so far
 
-1. `./scripts/nova-migracao.sh adicionar_indice_relatorios`
-   Cria `AAAAMMDDHHMMSS_adicionar_indice_relatorios.up.sql` e `.down.sql`.
-   O nome leva data e hora para que os dois não criem migrações com o mesmo número.
-2. O `.up.sql` faz a alteração; o `.down.sql` desfaz exatamente essa alteração.
-3. (Recomendado) Testar `up`, `down 1` e `up` na base de dados local, para não partir o staging ao outro.
-4. `./scripts/para-staging.sh`: o Jenkins aplica-a em staging.
-5. Pull request para `main`: depois de aprovada e confirmada, o Jenkins aplica-a em produção.
+| Version | What it does |
+|---|---|
+| `000001_initial_schema` | The first 29 tables. |
+| `000002_refined_data_model` | The data model of the SRS (chapters 6 and 7, annex B): 48 tables, 64 foreign keys, 10 business-rule triggers. Converts existing rows. |
 
-**Nunca editar uma migração que já foi aplicada em staging ou produção.** Corrige-se sempre com uma migração nova.
-Se o staging ficar com migrações de ramos abandonados: `infra/server/repor-staging.sh` no servidor.
+## Creating a new migration
 
-## Ligar com o DBeaver
+1. `migrate create -ext sql -dir database/migrations -seq add_reports_index`
+   creates `000003_add_reports_index.up.sql` and `.down.sql` (the next free number).
+   If both developers take the same number, whoever merges second renumbers theirs.
+2. `.up.sql` makes the change; `.down.sql` undoes exactly that change. Wrap each in `BEGIN; ... COMMIT;`.
+3. (Recommended) Test `up`, `down 1` and `up` on the local database, so staging doesn't break for the other developer.
+4. Push to branch and deploy via Jenkins pipeline.
+5. Pull request to `main`: once approved and merged, Jenkins applies it in production.
 
-- **No Mac (desenvolvimento):** host `localhost`, porta `5432`, base `voltik`, utilizador `voltik_leitura`.
-- **Staging / produção:** host `localhost`, porta `5433` (staging) ou `5434` (produção), base `voltik`, utilizador `voltik_leitura`.
-  No separador **SSH**: ativar o túnel com o IP do servidor, utilizador `ubuntu` e a vossa chave privada.
-  Estas portas nunca são abertas na Oracle: só existem dentro do servidor.
-- Em produção, usar **sempre** `voltik_leitura`. Alterações a dados de produção à mão: nunca.
+**Never edit a migration that has already run on staging or production.** Always fix it with a new migration.
 
-## Convenções do esquema
+## Connecting with DBeaver
 
-- Identificadores `UUID` com `gen_random_uuid()`; leituras, previsões e auditoria usam `BIGSERIAL`.
-- Datas e horas sempre em `TIMESTAMPTZ`, guardadas em UTC.
-- Toda a chave estrangeira usada em pesquisas tem índice (o PostgreSQL não os cria sozinho).
-- Valores fechados com `CHECK (... IN (...))`; confirmar que cabem no `VARCHAR` da coluna.
+- **Staging / production:** host `localhost`, port `5433` (staging) or `5434` (production), database `voltik`, user `voltik_readonly`.
+  In the **SSH** tab, enable the tunnel with the server IP, user `ubuntu` and your private key.
+  These ports are never opened on Oracle: they only exist inside the server.
+- **Local (optional):** host `localhost`, port `5432`, database `voltik`, user `voltik_readonly`.
+- In production, **always** use `voltik_readonly`. Never change production data by hand.
 
-## Decisão em aberto
+## Schema conventions
 
-`ON DELETE CASCADE` em `pacientes` e `utilizadores` apaga todo o histórico clínico quando se apaga uma conta.
-Decidir se é esse o comportamento, ou se se desativa e anonimiza a conta (preferível para dados de saúde).
-Registar a decisão em `docs/decisoes/`.
+- `UUID` identifiers with `gen_random_uuid()`; readings, heart rate samples, predictions and the audit log use `BIGSERIAL`.
+- Instants are `TIMESTAMPTZ` (stored in UTC) and end in `_at`; calendar dates are `DATE` and end in `_date`.
+- Booleans start with `is_` (or `auto_` / `notify_`).
+- Lists the business can extend are **enumeration tables** (`genders`, `diabetes_types`, `therapy_types`, `device_types`,
+  `meal_types`, `insulin_types`, `medical_specialties`, `identity_providers`, `subscription_plans`):
+  `SMALLINT` id, stable `code` in lower snake_case, `label` in Portuguese, `is_active`. A new value is a new row, not a migration;
+  a value in use is hidden with `is_active = false`, never deleted. The API exposes the `code`.
+- Fixed state machines (statuses, channels) use `CHECK (... IN (...))` with lower snake_case values.
+- Text columns never accept blank text (`CHECK (btrim(col) <> '')`); optional text is `NULL`, not `''`.
+- Constraint names: single-column checks are `<table>_<column>_check`; rules over several columns are `ck_*`,
+  unique constraints `uq_*`, composite foreign keys `fk_*`, triggers `trg_<table>_<purpose>`.
+- Every foreign key has an index, unless a `UNIQUE` constraint already starts with that column.
+- **No passwords.** Sign-in is external only (OpenID Connect); a user is identified by
+  `external_identities (provider_id, provider_subject)`. The email is optional, because some providers do not share it.
+- Roles come from the data, not from a profile table: patient = live row in `patients`, caregiver = active `caregiver_links`,
+  clinician = live row in `health_professionals`, company manager = `organization_managers`, admin = `users.is_platform_admin`.
+
+## Integrity rules enforced by the database
+
+- Emails are unique ignoring case among live users (`uq_users_email_lower`).
+- Composite foreign keys keep related rows on the same patient: a reading's or activity's device, an insulin dose's meal,
+  a report's follow-up, and a company code's manager (who must manage that company).
+- Conversations and teleconsultations hang from a follow-up (`patient_professional_assignments`) and/or a caregiver link.
+  There is one conversation per channel, and a caregiver-doctor conversation is about one patient.
+- Neither a clinician nor a patient has two scheduled consultations at the same time.
+- An alert has exactly one source, and it matches the type: critical alerts come from a reading, predicted alerts from a
+  prediction, sensor alerts from a device. Each recipient and channel has its own delivery row (`alert_recipients`).
+- A company issues and activates codes only while it is active and within its seats; a subscription covers at most the
+  number of patients its plan allows, and a patient is covered by one subscription at a time.
+- Nobody is their own caregiver or clinician. Only composite dishes have ingredients.
+- An emergency contact's priority is unique per patient, checked at commit so two contacts can swap places.
+- Status columns agree with their timestamps (an eaten meal has `eaten_at`, an acknowledged alert has `acknowledged_at`,
+  a used code has `used_at`, a revoked link has `revoked_at`).
+- Report percentages are between 0 and 100, and TIR + TBR + TAR add up to 100 (±0.2).
+- The audit log is never changed: `voltik_api` has no `UPDATE`/`DELETE` on it, and a trigger blocks everyone else.
+
+The triggers raise `SQLSTATE 23514` (`check_violation`) with a constraint name the API maps to an error code:
+`seat_limit_reached`, `organization_inactive`, `beneficiary_limit`, `self_link`, `slot_taken`, `sender_not_in_channel`,
+`cross_patient_attachment`, `cross_patient_conversation`, `not_composite_dish`, `audit_log_immutable`.
+
+## Deletion rules
+
+- Deleting an account is a hard delete (SRS UC016/UC018): it cascades to the patient and all their clinical data.
+  Audit log rows stay, with the deleted user or patient set to `NULL`.
+- Health professionals are never deleted, only soft-deleted (`deleted_at`): their user and their follow-ups reference
+  them with `ON DELETE RESTRICT`, so the clinical history is kept.
+- Enumeration values and legal documents are never deleted (`ON DELETE RESTRICT`); they are deactivated or superseded
+  by a new version.

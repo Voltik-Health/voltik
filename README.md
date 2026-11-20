@@ -1,41 +1,47 @@
 # Voltik
 
-Plataforma de monitorização preditiva da glicemia, com a assistente **Iris**.
-Avisa as pessoas com diabetes **antes** de uma hipoglicemia, cruzando o sensor de glicemia contínua com a atividade física do relógio.
+Predictive glucose monitoring platform with the AI assistant **Iris**.  
+It warns people with diabetes **before** a hypoglycaemia, combining continuous glucose monitors (CGM) with physical activity from smartwatches.
 
-Projeto de Rui Passos e Afonso Carvalho · CTeSP TPSI · IPMAIA · 2026
+Rui Passos & Afonso Carvalho · CTeSP TPSI · IPMAIA · 2026
 
-**Para começar:** [`docs/guias/00-guia-de-arranque.md`](docs/guias/00-guia-de-arranque.md)
+---
 
-## Ambientes
+## Environments
 
-| Ambiente | Ramo | Como lá chega o código | Dados |
+| Environment | Branch | Deployment | Data |
 |---|---|---|---|
-| **Staging** | `staging` | Push livre, sem aprovação (`./scripts/para-staging.sh`). O Jenkins publica sozinho. | Fictícios |
-| **Produção** | `main` | Pull request com aprovação do outro elemento + confirmação no Jenkins | Reais |
-| Local | qualquer | Só os frontends correm no Mac, ligados à API de **staging** | — |
+| **Local** | any | Run locally via `docker-compose.yml` | Fictitious / Seeds |
+| **Staging** | `staging` | Direct push or PR merge; tested on staging server | Fictitious |
+| **Production** | `main` | Pull request approved by peer developer | Real |
 
-## Estrutura do repositório
+---
 
-| Pasta | Conteúdo | Tecnologia |
+## Repository Layout
+
+| Directory / File | Contents | Technology |
 |---|---|---|
-| `android/` | App Android | Kotlin + Jetpack Compose (Android Studio) |
-| `ios/` | App iOS | Swift + SwiftUI (Xcode) |
-| `web/` | Portal web | Vue 3 |
-| `backend/` | API | Go (REST, documentada em OpenAPI) |
-| `ml/` | Serviço de previsão | Python + FastAPI |
-| `api/` | Contrato da API, partilhado por todos os clientes | OpenAPI 3 |
-| `database/` | Migrações, papéis e dados de exemplo | PostgreSQL 17 + golang-migrate |
-| `infra/` | Servidor, proxy HTTPS e scripts de publicação | Oracle Cloud, Docker, Caddy |
-| `scripts/` | Ajudas do dia a dia (enviar para staging, nova migração) | Bash |
-| `docs/` | Guias, entregas, diagramas e decisões técnicas | |
-| `Jenkinsfile` | Pipeline: testes → staging → produção | Jenkins |
+| `apps/android/` | Android client application | Kotlin + Jetpack Compose |
+| `apps/ios/` | iOS client application | Swift + SwiftUI |
+| `apps/web/` | Web portal (patient & clinical dashboard) | React (TypeScript) + Vite |
+| `backend/` | Core REST API (Clean Architecture) | Go |
+| `database/` | Migrations, roles initialization and seed data | PostgreSQL 17 + golang-migrate |
+| `ml/` | Glucose prediction service & Iris assistant | Python + FastAPI / Google Gemini |
+| `api/` | API specifications and shared contracts | OpenAPI 3 |
+| `docs/` | Architecture decisions (ADRs), deliverables and diagrams | Markdown & PDF |
+| `docker-compose.yml` | Local development environment orchestration | Docker Compose |
+| `Jenkinsfile` | Continuous integration and deployment pipeline | Jenkins |
+| `Makefile` | Common development shortcuts | Make |
 
-## Regras da equipa
+---
 
-- `main` é produção: só recebe código por pull request aprovada pelo outro elemento.
-- `staging` é o ambiente de testes partilhado: push livre, a qualquer momento.
-- Cada tarefa num ramo próprio, criado a partir de `main`, com a chave do Jira: `VOLT-42-registo-refeicoes`.
-- A pull request para `main` é sempre do **ramo da tarefa**, nunca do ramo `staging`.
-- O esquema da base de dados só muda com uma nova migração (`./scripts/nova-migracao.sh`). Nunca à mão.
-- Segredos nunca entram no Git. Dados reais nunca entram em staging.
+## Team Rules
+
+- `main` is production: it only receives code through a pull request approved by the other developer.
+- `staging` is the shared test environment.
+- Each task gets its own branch, created from `main`, named with the task description (e.g. `feat/meal-logging`).
+- Pull requests to `main` always come from the **task branch**, never directly from `staging`.
+- The database schema only changes through a new migration in `database/migrations/`. Never by hand.
+- Sign-in is external only (Google, Microsoft, Apple, Facebook). Voltik never stores passwords.
+- Secrets never go into Git. Real data never goes into staging.
+- Everything in this repository (code, comments, commits, documentation) is written in English.

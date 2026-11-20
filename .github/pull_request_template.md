@@ -1,13 +1,13 @@
-## O que muda
-<!-- Descrição curta -->
+## What changes
+<!-- Short description -->
 
-## Tarefa no Jira
+## Jira ticket
 VOLT-
 
-## Como testar
-<!-- Passos para o revisor -->
+## How to test
+<!-- Steps for the reviewer -->
 
-## Verificações
-- [ ] Testei localmente
-- [ ] Se alterei a base de dados, criei uma nova migração (up e down) e testei up → down → up
-- [ ] Não há segredos nem dados reais no código
+## Checklist
+- [ ] Tested on staging
+- [ ] If I changed the database, I added a new migration (up and down) and tested up → down → up
+- [ ] No secrets and no real data in the code
