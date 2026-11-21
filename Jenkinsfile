@@ -233,28 +233,76 @@ pipeline {
         success {
             echo "✅ SUCCESS: Voltik pipeline completed successfully for [${targetEnv.toUpperCase()}]!"
             script {
-                def isDeployBranch = (env.BRANCH_NAME == 'staging' || env.BRANCH_NAME == 'main')
-                if (isDeployBranch) {
-                    def liveUrl = (targetEnv == 'production') ? 'https://voltik-cgm.duckdns.org/' : 'https://voltik-cgm-staging.duckdns.org/'
-                    def header = (targetEnv == 'production') ? '🎉 *PRODUCTION DEPLOYED:*' : '🚀 *STAGING DEPLOYED:*'
-                    try {
-                        slackSend(
-                            channel: '#deployments',
-                            color: 'good',
-                            message: "${header} Voltik ${targetEnv.capitalize()} updated successfully!\n• *Branch:* `${env.BRANCH_NAME}`\n• *Live URL:* ${liveUrl}"
-                        )
-                    } catch (Exception e) {
-                        echo "⚠️ slackSend step failed, trying script: ${e.message}"
+                def isDeployBranch = (env.CHANGE_ID == null && (env.BRANCH_NAME == 'staging' || env.BRANCH_NAME == 'main'))
+                def isTargetPR = (env.CHANGE_ID != null && (env.CHANGE_TARGET == 'staging' || env.CHANGE_TARGET == 'main'))
+                if (isDeployBranch || isTargetPR) {
+                    def targetChannel = '#deployments'
+                    def notifyEnv = isTargetPR ? (env.CHANGE_TARGET == 'main' ? 'production' : 'staging') : targetEnv
+                    def liveUrl = (notifyEnv == 'production') ? 'https://voltik-cgm.duckdns.org/' : 'https://voltik-cgm-staging.duckdns.org/'
+                    def header = isDeployBranch
+                        ? ((notifyEnv == 'production') ? '🎉 *PRODUCTION DEPLOYED:*' : '🚀 *STAGING DEPLOYED:*')
+                        : "✅ *PR #${env.CHANGE_ID} CHECKS PASSED:*"
+                    def notifyScript = "${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh"
+                    def sentViaCard = false
+
+                    if (fileExists(notifyScript)) {
                         try {
+                            def durationStr = (currentBuild.durationString ?: 'N/A').replace(' and counting', '').trim()
+                            def commitSubject = sh(script: "git log -1 --pretty=format:'%s' 2>/dev/null || echo ''", returnStdout: true).trim()
+                            def triggerMode = env.CHANGE_ID ? "Pull Request #${env.CHANGE_ID}" : (isFullBuild ? 'Full Release Build' : 'Incremental CI/CD')
+
+                            def dbEnabled = config?.modules?.database?.enabled ?: false
+                            def apiEnabled = config?.modules?.backend_api?.enabled ?: false
+                            def webEnabled = config?.modules?.web?.enabled ?: false
+                            def mlEnabled = config?.modules?.ml_service?.enabled ?: false
+
+                            def dbState = !dbEnabled ? 'disabled' : (changedDb ? (isDeployBranch ? 'deployed' : 'passed') : 'skipped')
+                            def apiState = !apiEnabled ? 'disabled' : (changedApi ? (isDeployBranch ? 'healthy' : 'passed') : 'skipped')
+                            def webState = !webEnabled ? 'disabled' : (changedWeb ? (isDeployBranch ? 'deployed' : 'passed') : 'skipped')
+                            def mlState = !mlEnabled ? 'disabled' : (changedML ? (isDeployBranch ? 'deployed' : 'skipped') : 'skipped')
+                            def modulesStatus = "db:${dbState},api:${apiState},web:${webState},ml:${mlState}"
+                            def summaryMsg = isDeployBranch
+                                ? "Voltik ${notifyEnv} updated and verified healthy."
+                                : "All CI checks passed for PR #${env.CHANGE_ID} targeting ${env.CHANGE_TARGET}."
+
                             withCredentials([string(credentialsId: 'slack-token', variable: 'SLACK_AUTH')]) {
-                                sh "bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh SUCCESS 'Deployment completed for ${targetEnv}'"
+                                withEnv([
+                                    "NOTIFY_SCRIPT=${notifyScript}",
+                                    "TARGET_ENV=${notifyEnv}",
+                                    "SLACK_CHANNEL=${targetChannel}",
+                                    "PIPELINE_STAGE=${currentStage}",
+                                    "PIPELINE_MODULES=${modulesStatus}",
+                                    "PIPELINE_TRIGGER=${triggerMode}",
+                                    "PIPELINE_IS_DEPLOY=${isDeployBranch}",
+                                    "PIPELINE_COMMIT_SUBJECT=${commitSubject}",
+                                    "PIPELINE_MSG=${summaryMsg}",
+                                    "PIPELINE_DURATION=${durationStr}"
+                                ]) {
+                                    sh 'bash "$NOTIFY_SCRIPT" SUCCESS "$TARGET_ENV" all "$PIPELINE_MSG" "" "$PIPELINE_DURATION"'
+                                }
                             }
+                            sentViaCard = true
+                        } catch (Exception e) {
+                            echo "⚠️ notify-slack.sh failed, falling back to slackSend: ${e.message}"
+                        }
+                    }
+
+                    if (!sentViaCard) {
+                        try {
+                            def fallbackMsg = isDeployBranch
+                                ? "${header} Voltik ${notifyEnv.capitalize()} updated successfully!\n• *Branch:* `${env.BRANCH_NAME}`\n• *Live URL:* ${liveUrl}"
+                                : "${header} Target: `${env.CHANGE_TARGET}` (${env.BRANCH_NAME})"
+                            slackSend(
+                                channel: targetChannel,
+                                color: 'good',
+                                message: fallbackMsg
+                            )
                         } catch (Exception ex) {
                             echo "⚠️ Fallback notification error: ${ex.message}"
                         }
                     }
                 } else {
-                    echo "ℹ️ Feature branch [${env.BRANCH_NAME}] passed all checks. Silent success (no Slack notification sent)."
+                    echo "ℹ️ Branch [${env.BRANCH_NAME}] is not staging/main or a PR targeting them. Silent success (no Slack notification sent)."
                 }
             }
             cleanWs()
@@ -262,24 +310,67 @@ pipeline {
         failure {
             echo "❌ FAILURE: Pipeline failed at stage: ${currentStage}!"
             script {
-                def isDeployBranch = (env.BRANCH_NAME == 'staging' || env.BRANCH_NAME == 'main')
-                def targetChannel = isDeployBranch ? '#deployments' : '#voltik-dev'
-                def errorHeader = isDeployBranch ? "🚨 *DEPLOYMENT FAILED [${targetEnv.toUpperCase()}]:*" : "❌ *CI TESTS FAILED:*"
-                try {
-                    slackSend(
-                        channel: targetChannel,
-                        color: 'danger',
-                        message: "${errorHeader} Pipeline failed at stage: *${currentStage}*!\n• *Branch:* `${env.BRANCH_NAME}`"
-                    )
-                } catch (Exception e) {
-                    echo "⚠️ slackSend step failed, trying script: ${e.message}"
-                    try {
-                        withCredentials([string(credentialsId: 'slack-token', variable: 'SLACK_AUTH')]) {
-                            sh "SLACK_CHANNEL='${targetChannel}' bash ${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh FAILURE '${currentStage}'"
+                def isDeployBranch = (env.CHANGE_ID == null && (env.BRANCH_NAME == 'staging' || env.BRANCH_NAME == 'main'))
+                def isTargetPR = (env.CHANGE_ID != null && (env.CHANGE_TARGET == 'staging' || env.CHANGE_TARGET == 'main'))
+                if (isDeployBranch || isTargetPR) {
+                    def targetChannel = '#deployments'
+                    def notifyEnv = isTargetPR ? (env.CHANGE_TARGET == 'main' ? 'production' : 'staging') : targetEnv
+                    def errorHeader = isDeployBranch ? "🚨 *DEPLOYMENT FAILED [${notifyEnv.toUpperCase()}]:*" : "❌ *PR #${env.CHANGE_ID} TESTS FAILED:*"
+                    def notifyScript = "${env.INFRA_DIR}/Jenkins/scripts/notify-slack.sh"
+                    def sentViaCard = false
+
+                    if (fileExists(notifyScript)) {
+                        try {
+                            def durationStr = (currentBuild.durationString ?: 'N/A').replace(' and counting', '').trim()
+                            def commitSubject = sh(script: "git log -1 --pretty=format:'%s' 2>/dev/null || echo ''", returnStdout: true).trim()
+                            def triggerMode = env.CHANGE_ID ? "Pull Request #${env.CHANGE_ID}" : (isFullBuild ? 'Full Release Build' : 'Incremental CI/CD')
+
+                            def dbEnabled = config?.modules?.database?.enabled ?: false
+                            def apiEnabled = config?.modules?.backend_api?.enabled ?: false
+                            def webEnabled = config?.modules?.web?.enabled ?: false
+                            def mlEnabled = config?.modules?.ml_service?.enabled ?: false
+
+                            def dbState = !dbEnabled ? 'disabled' : (currentStage == 'Test: Database' ? 'failed' : (changedDb ? 'passed' : 'skipped'))
+                            def apiState = !apiEnabled ? 'disabled' : (currentStage == 'Test: Backend Go API' ? 'failed' : (changedApi ? 'passed' : 'skipped'))
+                            def webState = !webEnabled ? 'disabled' : (currentStage == 'Test: Web Portal' ? 'failed' : (changedWeb ? 'passed' : 'skipped'))
+                            def mlState = !mlEnabled ? 'disabled' : (currentStage == 'Test: ML Service' ? 'failed' : (changedML ? 'passed' : 'skipped'))
+                            def modulesStatus = "db:${dbState},api:${apiState},web:${webState},ml:${mlState}"
+
+                            withCredentials([string(credentialsId: 'slack-token', variable: 'SLACK_AUTH')]) {
+                                withEnv([
+                                    "NOTIFY_SCRIPT=${notifyScript}",
+                                    "TARGET_ENV=${notifyEnv}",
+                                    "SLACK_CHANNEL=${targetChannel}",
+                                    "PIPELINE_STAGE=${currentStage}",
+                                    "PIPELINE_MODULES=${modulesStatus}",
+                                    "PIPELINE_TRIGGER=${triggerMode}",
+                                    "PIPELINE_IS_DEPLOY=${isDeployBranch}",
+                                    "PIPELINE_COMMIT_SUBJECT=${commitSubject}",
+                                    "PIPELINE_MSG=Pipeline failed at stage: ${currentStage}",
+                                    "PIPELINE_DURATION=${durationStr}"
+                                ]) {
+                                    sh 'bash "$NOTIFY_SCRIPT" FAILURE "$TARGET_ENV" all "$PIPELINE_MSG" "" "$PIPELINE_DURATION"'
+                                }
+                            }
+                            sentViaCard = true
+                        } catch (Exception e) {
+                            echo "⚠️ notify-slack.sh failed, falling back to slackSend: ${e.message}"
                         }
-                    } catch (Exception ex) {
-                        echo "⚠️ Fallback notification error: ${ex.message}"
                     }
+
+                    if (!sentViaCard) {
+                        try {
+                            slackSend(
+                                channel: targetChannel,
+                                color: 'danger',
+                                message: "${errorHeader} Pipeline failed at stage: *${currentStage}*!\n• *Branch:* `${env.BRANCH_NAME}`"
+                            )
+                        } catch (Exception ex) {
+                            echo "⚠️ Fallback notification error: ${ex.message}"
+                        }
+                    }
+                } else {
+                    echo "ℹ️ Branch [${env.BRANCH_NAME}] is not staging/main or a PR targeting them. Silent failure (no Slack notification sent)."
                 }
             }
             cleanWs()
